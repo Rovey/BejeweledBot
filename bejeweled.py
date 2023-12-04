@@ -12,15 +12,16 @@ COLORS = {
     (206, 70, 196): "purple",
     (24, 123, 255): "orange",
     (24, 222, 255): "yellow",
-    (211, 211, 211): "white"
+    (211, 211, 211): "white",
 }
 
 # Initialize an 8x8 grid map to keep track of found colors
-color_grid = [['' for _ in range(8)] for _ in range(8)]
+color_grid = [["" for _ in range(8)] for _ in range(8)]
+
 
 def get_grid_coordinates():
     """
-    Get the top-left and bottom-right coordinates of the game grid by prompting the user to 
+    Get the top-left and bottom-right coordinates of the game grid by prompting the user to
     click on the corners.
     """
     input("Click on the top-left corner of the game grid and press Enter.")
@@ -28,6 +29,7 @@ def get_grid_coordinates():
     input("Click on the bottom-right corner of the game grid and press Enter.")
     bottom_right_corner = pyautogui.position()
     return top_left_corner, bottom_right_corner
+
 
 def capture_grid(top_left_corner, bottom_right_corner):
     """
@@ -38,7 +40,7 @@ def capture_grid(top_left_corner, bottom_right_corner):
             top_left_corner[0],
             top_left_corner[1],
             bottom_right_corner[0] - top_left_corner[0],
-            bottom_right_corner[1] - top_left_corner[1]
+            bottom_right_corner[1] - top_left_corner[1],
         )
     )
     grid_img = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
@@ -52,17 +54,18 @@ def capture_grid(top_left_corner, bottom_right_corner):
             (i * cell_width, 0),
             (i * cell_width, grid_img.shape[0]),
             (0, 255, 0),
-            2
+            2,
         )
         cv2.line(
             grid_img,
             (0, i * cell_height),
             (grid_img.shape[1], i * cell_height),
             (0, 255, 0),
-            2
+            2,
         )
 
     return grid_img
+
 
 def mark_cell(grid_img, roww, coll):
     """
@@ -73,8 +76,8 @@ def mark_cell(grid_img, roww, coll):
     cell_width = grid_img.shape[1] // 8
     cell_height = grid_img.shape[0] // 8
     cell = grid_img[
-        roww * cell_height: (roww + 1) * cell_height,
-        coll * cell_width: (coll + 1) * cell_width
+        roww * cell_height : (roww + 1) * cell_height,
+        coll * cell_width : (coll + 1) * cell_width,
     ]
 
     for color, name in COLORS.items():
@@ -85,6 +88,7 @@ def mark_cell(grid_img, roww, coll):
         if cv2.countNonZero(mask) > 0:
             color_grid[roww][coll] = name
             return
+
 
 def find_optimal_move():
     """
@@ -101,10 +105,10 @@ def find_optimal_move():
                 # Swap with the cell to the right
                 (
                     color_grid[outer_row][inner_col],
-                    color_grid[outer_row][inner_col + 1]
+                    color_grid[outer_row][inner_col + 1],
                 ) = (
                     color_grid[outer_row][inner_col + 1],
-                    color_grid[outer_row][inner_col]
+                    color_grid[outer_row][inner_col],
                 )
 
                 # Check if the move creates a match
@@ -114,10 +118,10 @@ def find_optimal_move():
                 # Swap back to revert the change
                 (
                     color_grid[outer_row][inner_col],
-                    color_grid[outer_row][inner_col + 1]
+                    color_grid[outer_row][inner_col + 1],
                 ) = (
                     color_grid[outer_row][inner_col + 1],
-                    color_grid[outer_row][inner_col]
+                    color_grid[outer_row][inner_col],
                 )
 
             # Check for a potential move down
@@ -125,10 +129,10 @@ def find_optimal_move():
                 # Swap with the cell below
                 (
                     color_grid[outer_row][inner_col],
-                    color_grid[outer_row + 1][inner_col]
+                    color_grid[outer_row + 1][inner_col],
                 ) = (
                     color_grid[outer_row + 1][inner_col],
-                    color_grid[outer_row][inner_col]
+                    color_grid[outer_row][inner_col],
                 )
 
                 # Check if the move creates a match
@@ -138,13 +142,14 @@ def find_optimal_move():
                 # Swap back to revert the change
                 (
                     color_grid[outer_row][inner_col],
-                    color_grid[outer_row + 1][inner_col]
+                    color_grid[outer_row + 1][inner_col],
                 ) = (
                     color_grid[outer_row + 1][inner_col],
-                    color_grid[outer_row][inner_col]
+                    color_grid[outer_row][inner_col],
                 )
 
     return None
+
 
 def check_for_match():
     """
@@ -154,21 +159,24 @@ def check_for_match():
         for inner_col in range(6):
             # Check horizontally
             if (
-                color_grid[outer_row][inner_col] == color_grid[outer_row][inner_col + 1] ==
-                color_grid[outer_row][inner_col + 2]
+                color_grid[outer_row][inner_col]
+                == color_grid[outer_row][inner_col + 1]
+                == color_grid[outer_row][inner_col + 2]
             ):
                 return True
 
         for inner_col in range(8):
             # Check vertically
             if (
-                outer_row < 6 and
-                color_grid[outer_row][inner_col] == color_grid[outer_row + 1][inner_col] ==
-                color_grid[outer_row + 2][inner_col]
+                outer_row < 6
+                and color_grid[outer_row][inner_col]
+                == color_grid[outer_row + 1][inner_col]
+                == color_grid[outer_row + 2][inner_col]
             ):
                 return True
 
     return False
+
 
 # Function to perform a move
 def perform_move(src_row, src_col, dest_row, dest_col):
@@ -177,19 +185,28 @@ def perform_move(src_row, src_col, dest_row, dest_col):
     """
     # Calculate the positions in screen coordinates
     from_position = (
-        top_left[0] + src_col * (grid_image.shape[1] // 8) + (grid_image.shape[1] // 16),
-        top_left[1] + src_row * (grid_image.shape[0] // 8) + (grid_image.shape[0] // 16)
+        top_left[0]
+        + src_col * (grid_image.shape[1] // 8)
+        + (grid_image.shape[1] // 16),
+        top_left[1]
+        + src_row * (grid_image.shape[0] // 8)
+        + (grid_image.shape[0] // 16),
     )
 
     to_position = (
-        top_left[0] + dest_col * (grid_image.shape[1] // 8) + (grid_image.shape[1] // 16),
-        top_left[1] + dest_row * (grid_image.shape[0] // 8) + (grid_image.shape[0] // 16)
+        top_left[0]
+        + dest_col * (grid_image.shape[1] // 8)
+        + (grid_image.shape[1] // 16),
+        top_left[1]
+        + dest_row * (grid_image.shape[0] // 8)
+        + (grid_image.shape[0] // 16),
     )
 
     # Simulate mouse click to perform the move
     pyautogui.click(from_position)
     time.sleep(0.1)  # Add a small delay between clicks
     pyautogui.click(to_position)
+
 
 # Get grid coordinates once before entering the main loop
 top_left, bottom_right = get_grid_coordinates()
@@ -216,7 +233,7 @@ while True:
         perform_move(from_row, from_col, to_row, to_col)
 
     # Check for the "Escape" key press to exit the script
-    if keyboard.is_pressed('esc'):
+    if keyboard.is_pressed("esc"):
         break
 
     # Add a minimal delay before looping
