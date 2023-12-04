@@ -18,7 +18,6 @@ COLORS = {
 # Initialize an 8x8 grid map to keep track of found colors
 color_grid = [['' for _ in range(8)] for _ in range(8)]
 
-# Function to get the grid coordinates
 def get_grid_coordinates():
     """
     Get the top-left and bottom-right coordinates of the game grid by prompting the user to 
@@ -30,7 +29,6 @@ def get_grid_coordinates():
     bottom_right_corner = pyautogui.position()
     return top_left_corner, bottom_right_corner
 
-# Function to capture the game grid
 def capture_grid(top_left_corner, bottom_right_corner):
     """
     Capture the game grid within the specified region and return the grid image.
@@ -49,12 +47,23 @@ def capture_grid(top_left_corner, bottom_right_corner):
     cell_width = grid_img.shape[1] // 8
     cell_height = grid_img.shape[0] // 8
     for i in range(1, 8):
-        cv2.line(grid_img, (i * cell_width, 0), (i * cell_width, grid_img.shape[0]), (0, 255, 0), 2)
-        cv2.line(grid_img, (0, i * cell_height), (grid_img.shape[1], i * cell_height), (0, 255, 0), 2)
+        cv2.line(
+            grid_img,
+            (i * cell_width, 0),
+            (i * cell_width, grid_img.shape[0]),
+            (0, 255, 0),
+            2
+        )
+        cv2.line(
+            grid_img,
+            (0, i * cell_height),
+            (grid_img.shape[1], i * cell_height),
+            (0, 255, 0),
+            2
+        )
 
     return grid_img
 
-# Function to mark the color in the grid map
 def mark_cell(grid_img, roww, coll):
     """
     Mark the color in the grid map based on the specified row and column.
@@ -63,87 +72,118 @@ def mark_cell(grid_img, roww, coll):
 
     cell_width = grid_img.shape[1] // 8
     cell_height = grid_img.shape[0] // 8
-    cell = grid_img[roww * cell_height: (roww + 1) * cell_height, coll * cell_width: (coll + 1) * cell_width]
+    cell = grid_img[
+        roww * cell_height: (roww + 1) * cell_height,
+        coll * cell_width: (coll + 1) * cell_width
+    ]
 
     for color, name in COLORS.items():
         # Create a binary mask for the specified color within a tolerance
         mask = cv2.inRange(cell, np.array(color) - 3, np.array(color) + 3)
-        
+
         # Check if any non-zero pixels in the mask
         if cv2.countNonZero(mask) > 0:
             color_grid[roww][coll] = name
             return
 
-# Function to search for an optimal move based on the color grid
 def find_optimal_move():
     """
     Search for an optimal move based on the current state of the color grid.
     """
-    for row in range(7, -1, -1):  # Iterate from bottom to top
-        for col in range(8):
+    for outer_row in range(7, -1, -1):  # Iterate from bottom to top
+        for inner_col in range(8):
             # Skip empty cells
-            if not color_grid[row][col]:
+            if not color_grid[outer_row][inner_col]:
                 continue
 
             # Check for a potential move to the right
-            if col < 7:
+            if inner_col < 7:
                 # Swap with the cell to the right
-                color_grid[row][col], color_grid[row][col + 1] = color_grid[row][col + 1], color_grid[row][col]
+                (
+                    color_grid[outer_row][inner_col],
+                    color_grid[outer_row][inner_col + 1]
+                ) = (
+                    color_grid[outer_row][inner_col + 1],
+                    color_grid[outer_row][inner_col]
+                )
 
                 # Check if the move creates a match
                 if check_for_match():
-                    return row, col, row, col + 1
+                    return outer_row, inner_col, outer_row, inner_col + 1
 
                 # Swap back to revert the change
-                color_grid[row][col], color_grid[row][col + 1] = color_grid[row][col + 1], color_grid[row][col]
+                (
+                    color_grid[outer_row][inner_col],
+                    color_grid[outer_row][inner_col + 1]
+                ) = (
+                    color_grid[outer_row][inner_col + 1],
+                    color_grid[outer_row][inner_col]
+                )
 
             # Check for a potential move down
-            if row < 7:
+            if outer_row < 7:
                 # Swap with the cell below
-                color_grid[row][col], color_grid[row + 1][col] = color_grid[row + 1][col], color_grid[row][col]
+                (
+                    color_grid[outer_row][inner_col],
+                    color_grid[outer_row + 1][inner_col]
+                ) = (
+                    color_grid[outer_row + 1][inner_col],
+                    color_grid[outer_row][inner_col]
+                )
 
                 # Check if the move creates a match
                 if check_for_match():
-                    return row, col, row + 1, col
+                    return outer_row, inner_col, outer_row + 1, inner_col
 
                 # Swap back to revert the change
-                color_grid[row][col], color_grid[row + 1][col] = color_grid[row + 1][col], color_grid[row][col]
+                (
+                    color_grid[outer_row][inner_col],
+                    color_grid[outer_row + 1][inner_col]
+                ) = (
+                    color_grid[outer_row + 1][inner_col],
+                    color_grid[outer_row][inner_col]
+                )
 
     return None
 
-# Function to check for a match in the color grid
 def check_for_match():
     """
     Check for a match in the color grid horizontally and vertically.
     """
-    for row in range(8):
-        for col in range(6):
+    for outer_row in range(8):
+        for inner_col in range(6):
             # Check horizontally
-            if color_grid[row][col] == color_grid[row][col + 1] == color_grid[row][col + 2]:
+            if (
+                color_grid[outer_row][inner_col] == color_grid[outer_row][inner_col + 1] ==
+                color_grid[outer_row][inner_col + 2]
+            ):
                 return True
 
-        for col in range(8):
+        for inner_col in range(8):
             # Check vertically
-            if row < 6 and color_grid[row][col] == color_grid[row + 1][col] == color_grid[row + 2][col]:
+            if (
+                outer_row < 6 and
+                color_grid[outer_row][inner_col] == color_grid[outer_row + 1][inner_col] ==
+                color_grid[outer_row + 2][inner_col]
+            ):
                 return True
 
     return False
 
-
 # Function to perform a move
-def perform_move(from_row, from_col, to_row, to_col):
+def perform_move(src_row, src_col, dest_row, dest_col):
     """
     Perform a move from the specified source to the destination coordinates.
     """
     # Calculate the positions in screen coordinates
     from_position = (
-        top_left[0] + from_col * (grid_image.shape[1] // 8) + (grid_image.shape[1] // 16),
-        top_left[1] + from_row * (grid_image.shape[0] // 8) + (grid_image.shape[0] // 16)
+        top_left[0] + src_col * (grid_image.shape[1] // 8) + (grid_image.shape[1] // 16),
+        top_left[1] + src_row * (grid_image.shape[0] // 8) + (grid_image.shape[0] // 16)
     )
 
     to_position = (
-        top_left[0] + to_col * (grid_image.shape[1] // 8) + (grid_image.shape[1] // 16),
-        top_left[1] + to_row * (grid_image.shape[0] // 8) + (grid_image.shape[0] // 16)
+        top_left[0] + dest_col * (grid_image.shape[1] // 8) + (grid_image.shape[1] // 16),
+        top_left[1] + dest_row * (grid_image.shape[0] // 8) + (grid_image.shape[0] // 16)
     )
 
     # Simulate mouse click to perform the move
