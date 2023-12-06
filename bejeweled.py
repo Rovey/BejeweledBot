@@ -91,109 +91,82 @@ def mark_cell(grid_img, roww, coll):
 
 
 def find_optimal_move():
-    """
-    Search for an optimal move based on the current state of the color grid.
-    """
-    for outer_row in range(7, -1, -1):  # Iterate from bottom to top
+    """Tries to find optimal position to move a gem to for the highest score."""
+    best_move = None
+    best_score = -float("inf")
+
+    for outer_row in range(7, -1, -1):
         for inner_col in range(8):
-            # Skip empty cells
             if not color_grid[outer_row][inner_col]:
                 continue
 
             # Check for a potential move to the right
             if inner_col < 7:
-                # Swap with the cell to the right
-                (
-                    color_grid[outer_row][inner_col],
+                color_grid[outer_row][inner_col], color_grid[outer_row][inner_col + 1] = (
                     color_grid[outer_row][inner_col + 1],
-                ) = (
+                    color_grid[outer_row][inner_col],
+                )
+                score = evaluate_state(color_grid)
+                color_grid[outer_row][inner_col], color_grid[outer_row][inner_col + 1] = (
                     color_grid[outer_row][inner_col + 1],
                     color_grid[outer_row][inner_col],
                 )
 
-                # Check if the move creates a match
-                if check_for_match_after_move(outer_row, inner_col, outer_row, inner_col + 1):
-                    return outer_row, inner_col, outer_row, inner_col + 1
-
-                # Swap back to revert the change
-                (
-                    color_grid[outer_row][inner_col],
-                    color_grid[outer_row][inner_col + 1],
-                ) = (
-                    color_grid[outer_row][inner_col + 1],
-                    color_grid[outer_row][inner_col],
-                )
+                if score > best_score:
+                    best_score = score
+                    best_move = (outer_row, inner_col, outer_row, inner_col + 1)
 
             # Check for a potential move down
             if outer_row < 7:
-                # Swap with the cell below
-                (
-                    color_grid[outer_row][inner_col],
+                color_grid[outer_row][inner_col], color_grid[outer_row + 1][inner_col] = (
                     color_grid[outer_row + 1][inner_col],
-                ) = (
+                    color_grid[outer_row][inner_col],
+                )
+                score = evaluate_state(color_grid)
+                color_grid[outer_row][inner_col], color_grid[outer_row + 1][inner_col] = (
                     color_grid[outer_row + 1][inner_col],
                     color_grid[outer_row][inner_col],
                 )
 
-                # Check if the move creates a match
-                if check_for_match_after_move(outer_row, inner_col, outer_row + 1, inner_col):
-                    return outer_row, inner_col, outer_row + 1, inner_col
-                
-                # Swap back to revert the change
-                (
-                    color_grid[outer_row][inner_col],
-                    color_grid[outer_row + 1][inner_col],
-                ) = (
-                    color_grid[outer_row + 1][inner_col],
-                    color_grid[outer_row][inner_col],
-                )
+                if score > best_score:
+                    best_score = score
+                    best_move = (outer_row, inner_col, outer_row + 1, inner_col)
 
-    return None
+    return best_move
 
 
-def check_for_match_after_move(src_row, src_col, dest_row, dest_col):
-    """
-    Check for a match in the color grid after a move has been performed.
-    """
-    def is_valid_index(row, col):
-        return 0 <= row < 8 and 0 <= col < 8
+def evaluate_state(grid):
+    """Checks the state of the grid and returns the score."""
+    score = 0
 
-    def check_line(row, col, row_offset, col_offset):
-        match_count = 0
-        for step in range(-2, 3):
-            row_index = row + row_offset * step
-            col_index = col + col_offset * step
-            if is_valid_index(row_index, col_index):
-                current_color = color_grid[row_index][col_index]
-                if current_color == color_grid[row][col]:
-                    match_count += 1
-                else:
-                    match_count = 0  # Reset the count if a different color is encountered
-            else:
-                match_count = 0  # Reset the count if an index is out of range
+    # Evaluate based on the number of valid consecutive colors in a row
+    for row in range(8):
+        for col in range(8):
+            color = grid[row][col]
+            if color:
+                # Check horizontally to the right
+                consecutive_right = 1
+                for i in range(1, 5):
+                    if col + i < 8 and grid[row][col + i] == color:
+                        consecutive_right += 1
+                    else:
+                        break
 
-            if match_count == 3:
-                return True
+                # Check vertically down
+                consecutive_down = 1
+                for i in range(1, 5):
+                    if row + i < 8 and grid[row + i][col] == color:
+                        consecutive_down += 1
+                    else:
+                        break
 
-        return False
+                # Update the score based on valid consecutive colors
+                if consecutive_right >= 3:
+                    score += consecutive_right
+                if consecutive_down >= 3:
+                    score += consecutive_down
 
-    # Check horizontally around the destination cell
-    if check_line(dest_row, dest_col, 0, 1):
-        return True
-
-    # Check vertically around the destination cell
-    if check_line(dest_row, dest_col, 1, 0):
-        return True
-
-    # Check horizontally around the source cell
-    if check_line(src_row, src_col, 0, 1):
-        return True
-
-    # Check vertically around the source cell
-    if check_line(src_row, src_col, 1, 0):
-        return True
-
-    return False
+    return score
 
 
 # Function to perform a move
@@ -247,7 +220,7 @@ while True:
     if move_coordinates:
         # Perform the move using the perform_move function
         from_row, from_col, to_row, to_col = move_coordinates
-        print(f"Performing move: {move_coordinates}")
+        print(f"Performing move: [{from_row}, {from_col}] -> [{to_row}, {to_col}]")
         perform_move(from_row, from_col, to_row, to_col)
 
     # Check for the "Escape" key press to exit the script
