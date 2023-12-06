@@ -24,9 +24,9 @@ def get_grid_coordinates():
     Get the top-left and bottom-right coordinates of the game grid by prompting the user to
     click on the corners.
     """
-    input("Click on the top-left corner of the game grid and press Enter.")
+    input("Move your mouse to the top-left corner of the game grid and press Enter.")
     top_left_corner = pyautogui.position()
-    input("Click on the bottom-right corner of the game grid and press Enter.")
+    input("Move your mouse to the bottom-right corner of the game grid and press Enter.")
     bottom_right_corner = pyautogui.position()
     return top_left_corner, bottom_right_corner
 
@@ -253,6 +253,3 @@ while True:
     # Check for the "Escape" key press to exit the script
     if keyboard.is_pressed("esc"):
         break
-
-    # Add a minimal delay before looping
-    time.sleep(0.1)
