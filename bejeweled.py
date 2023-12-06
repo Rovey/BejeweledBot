@@ -34,7 +34,9 @@ def get_grid_coordinates():
     """
     input("Move your mouse to the top-left corner of the game grid and press Enter.")
     top_left_corner = pyautogui.position()
-    input("Move your mouse to the bottom-right corner of the game grid and press Enter.")
+    input(
+        "Move your mouse to the bottom-right corner of the game grid and press Enter."
+    )
     bottom_right_corner = pyautogui.position()
     return top_left_corner, bottom_right_corner
 
@@ -110,12 +112,18 @@ def find_optimal_move():
 
             # Check for a potential move to the right
             if inner_col < 7:
-                color_grid[outer_row][inner_col], color_grid[outer_row][inner_col + 1] = (
+                (
+                    color_grid[outer_row][inner_col],
+                    color_grid[outer_row][inner_col + 1],
+                ) = (
                     color_grid[outer_row][inner_col + 1],
                     color_grid[outer_row][inner_col],
                 )
                 score = evaluate_state(color_grid)
-                color_grid[outer_row][inner_col], color_grid[outer_row][inner_col + 1] = (
+                (
+                    color_grid[outer_row][inner_col],
+                    color_grid[outer_row][inner_col + 1],
+                ) = (
                     color_grid[outer_row][inner_col + 1],
                     color_grid[outer_row][inner_col],
                 )
@@ -126,12 +134,18 @@ def find_optimal_move():
 
             # Check for a potential move down
             if outer_row < 7:
-                color_grid[outer_row][inner_col], color_grid[outer_row + 1][inner_col] = (
+                (
+                    color_grid[outer_row][inner_col],
+                    color_grid[outer_row + 1][inner_col],
+                ) = (
                     color_grid[outer_row + 1][inner_col],
                     color_grid[outer_row][inner_col],
                 )
                 score = evaluate_state(color_grid)
-                color_grid[outer_row][inner_col], color_grid[outer_row + 1][inner_col] = (
+                (
+                    color_grid[outer_row][inner_col],
+                    color_grid[outer_row + 1][inner_col],
+                ) = (
                     color_grid[outer_row + 1][inner_col],
                     color_grid[outer_row][inner_col],
                 )
