@@ -1,8 +1,16 @@
+"""
+Module: time - Provides time-related functions for adding delays between actions.
+Module: cv2 - OpenCV library for computer vision and image processing tasks.
+Module: numpy - Powerful numerical computing library for array manipulation and math operations.
+Module: pyautogui - Library for automating mouse and keyboard actions.
+Module: keyboard - Provides functions for working with keyboard inputs.
+"""
+import time
 import cv2
 import numpy as np
 import pyautogui
-import time
 import keyboard
+
 
 # Define colors
 COLORS = {
