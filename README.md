@@ -31,4 +31,7 @@ The dependencies include:
 - Setup Grid Coordinates: Run the script and follow the prompts to click on the top-left and bottom-right corners of the Bejeweled game grid.
 - Game Automation: The bot will continuously capture the grid, analyze colors, and make optimal moves until you press and hold the "Escape" key.
 
+## Running the Bot
+To start the bot, simply double-click the `run.bat` file. Make sure you have Python installed on your system. The bot will run until you press and hold the "Escape" key.
+
 Feel free to customize the color mappings and tweak the bot's logic based on your game environment.
