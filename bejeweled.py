@@ -112,7 +112,7 @@ def find_optimal_move():
                 )
 
                 # Check if the move creates a match
-                if check_for_match():
+                if check_for_match_after_move(outer_row, inner_col, outer_row, inner_col + 1):
                     return outer_row, inner_col, outer_row, inner_col + 1
 
                 # Swap back to revert the change
@@ -136,9 +136,9 @@ def find_optimal_move():
                 )
 
                 # Check if the move creates a match
-                if check_for_match():
+                if check_for_match_after_move(outer_row, inner_col, outer_row + 1, inner_col):
                     return outer_row, inner_col, outer_row + 1, inner_col
-
+                
                 # Swap back to revert the change
                 (
                     color_grid[outer_row][inner_col],
@@ -151,29 +151,47 @@ def find_optimal_move():
     return None
 
 
-def check_for_match():
+def check_for_match_after_move(src_row, src_col, dest_row, dest_col):
     """
-    Check for a match in the color grid horizontally and vertically.
+    Check for a match in the color grid after a move has been performed.
     """
-    for outer_row in range(8):
-        for inner_col in range(6):
-            # Check horizontally
-            if (
-                color_grid[outer_row][inner_col]
-                == color_grid[outer_row][inner_col + 1]
-                == color_grid[outer_row][inner_col + 2]
-            ):
+    def is_valid_index(row, col):
+        return 0 <= row < 8 and 0 <= col < 8
+
+    def check_line(row, col, row_offset, col_offset):
+        match_count = 0
+        for step in range(-2, 3):
+            row_index = row + row_offset * step
+            col_index = col + col_offset * step
+            if is_valid_index(row_index, col_index):
+                current_color = color_grid[row_index][col_index]
+                if current_color == color_grid[row][col]:
+                    match_count += 1
+                else:
+                    match_count = 0  # Reset the count if a different color is encountered
+            else:
+                match_count = 0  # Reset the count if an index is out of range
+
+            if match_count == 3:
                 return True
 
-        for inner_col in range(8):
-            # Check vertically
-            if (
-                outer_row < 6
-                and color_grid[outer_row][inner_col]
-                == color_grid[outer_row + 1][inner_col]
-                == color_grid[outer_row + 2][inner_col]
-            ):
-                return True
+        return False
+
+    # Check horizontally around the destination cell
+    if check_line(dest_row, dest_col, 0, 1):
+        return True
+
+    # Check vertically around the destination cell
+    if check_line(dest_row, dest_col, 1, 0):
+        return True
+
+    # Check horizontally around the source cell
+    if check_line(src_row, src_col, 0, 1):
+        return True
+
+    # Check vertically around the source cell
+    if check_line(src_row, src_col, 1, 0):
+        return True
 
     return False
 
