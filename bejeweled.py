@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import pyautogui
 import keyboard
+import concurrent.futures
 
 
 # Define colors
@@ -25,6 +26,8 @@ COLORS = {
 
 # Initialize an 8x8 grid map to keep track of found colors
 color_grid = [["" for _ in range(8)] for _ in range(8)]
+
+last_move = None
 
 
 def get_grid_coordinates():
@@ -100,59 +103,48 @@ def mark_cell(grid_img, roww, coll):
             return
 
 
+def evaluate_move(args):
+    row, col, direction = args
+    global color_grid  # Assuming color_grid is a global variable
+
+    if direction == "right":
+        color_grid[row][col], color_grid[row][col + 1] = color_grid[row][col + 1], color_grid[row][col]
+        score = evaluate_state(color_grid)
+        color_grid[row][col], color_grid[row][col + 1] = color_grid[row][col + 1], color_grid[row][col]
+        return score, (row, col, row, col + 1)
+    elif direction == "down":
+        color_grid[row][col], color_grid[row + 1][col] = color_grid[row + 1][col], color_grid[row][col]
+        score = evaluate_state(color_grid)
+        color_grid[row][col], color_grid[row + 1][col] = color_grid[row + 1][col], color_grid[row][col]
+        return score, (row, col, row + 1, col)
+
+
 def find_optimal_move():
     """Tries to find optimal position to move a gem to for the highest score."""
     best_move = None
     best_score = -float("inf")
 
-    for outer_row in range(7, -1, -1):
-        for inner_col in range(8):
-            if not color_grid[outer_row][inner_col]:
-                continue
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = []
 
-            # Check for a potential move to the right
-            if inner_col < 7:
-                (
-                    color_grid[outer_row][inner_col],
-                    color_grid[outer_row][inner_col + 1],
-                ) = (
-                    color_grid[outer_row][inner_col + 1],
-                    color_grid[outer_row][inner_col],
-                )
-                score = evaluate_state(color_grid)
-                (
-                    color_grid[outer_row][inner_col],
-                    color_grid[outer_row][inner_col + 1],
-                ) = (
-                    color_grid[outer_row][inner_col + 1],
-                    color_grid[outer_row][inner_col],
-                )
+        for outer_row in range(7, -1, -1):
+            for inner_col in range(8):
+                if not color_grid[outer_row][inner_col]:
+                    continue
 
-                if score > best_score:
-                    best_score = score
-                    best_move = (outer_row, inner_col, outer_row, inner_col + 1)
+                if inner_col < 7:
+                    futures.append(executor.submit(evaluate_move, (outer_row, inner_col, "right")))
+                if outer_row < 7:
+                    futures.append(executor.submit(evaluate_move, (outer_row, inner_col, "down")))
 
-            # Check for a potential move down
-            if outer_row < 7:
-                (
-                    color_grid[outer_row][inner_col],
-                    color_grid[outer_row + 1][inner_col],
-                ) = (
-                    color_grid[outer_row + 1][inner_col],
-                    color_grid[outer_row][inner_col],
-                )
-                score = evaluate_state(color_grid)
-                (
-                    color_grid[outer_row][inner_col],
-                    color_grid[outer_row + 1][inner_col],
-                ) = (
-                    color_grid[outer_row + 1][inner_col],
-                    color_grid[outer_row][inner_col],
-                )
+        # Wait for all futures to be completed
+        concurrent.futures.wait(futures)
 
-                if score > best_score:
-                    best_score = score
-                    best_move = (outer_row, inner_col, outer_row + 1, inner_col)
+        for future in futures:
+            score, move = future.result()
+            if score > best_score:
+                best_score = score
+                best_move = move
 
     return best_move
 
@@ -196,6 +188,8 @@ def perform_move(src_row, src_col, dest_row, dest_col):
     """
     Perform a move from the specified source to the destination coordinates.
     """
+    global last_move
+
     # Calculate the positions in screen coordinates
     from_position = (
         top_left[0]
@@ -220,6 +214,13 @@ def perform_move(src_row, src_col, dest_row, dest_col):
     time.sleep(0.1)  # Add a small delay between clicks
     pyautogui.click(to_position)
 
+    last_move = (src_row, src_col, dest_row, dest_col)
+
+
+def mark_cell_parallel(args):
+    grid_image, row, col = args
+    mark_cell(grid_image, row, col)
+
 
 # Get grid coordinates once before entering the main loop
 top_left, bottom_right = get_grid_coordinates()
@@ -231,10 +232,12 @@ while True:
     cv2.imshow("Grid Overlay", grid_image)
     cv2.waitKey(100)
 
-    # Loop through each cell and mark the color
-    for row in range(8):
-        for col in range(8):
-            mark_cell(grid_image, row, col)
+    # Create a list of arguments for the mark_cell_parallel function
+    cell_args = [(grid_image, row, col) for row in range(8) for col in range(8)]
+
+    # Use ThreadPoolExecutor for parallel processing
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        executor.map(mark_cell_parallel, cell_args)
 
     # Search for an optimal move
     move_coordinates = find_optimal_move()
@@ -244,6 +247,9 @@ while True:
         from_row, from_col, to_row, to_col = move_coordinates
         print(f"Performing move: [{from_row}, {from_col}] -> [{to_row}, {to_col}]")
         perform_move(from_row, from_col, to_row, to_col)
+
+        if last_move == (from_row, from_col, to_row, to_col):
+            time.sleep(0.2)  # Sleep for a small delay to avoid getting stuck
 
     # Check for the "Escape" key press to exit the script
     if keyboard.is_pressed("esc"):
