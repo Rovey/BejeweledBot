@@ -7,6 +7,7 @@ move via mouse automation. Waits for board animations to settle before each move
 """
 
 import concurrent.futures
+import json
 import logging
 import os
 import time
@@ -97,103 +98,73 @@ def format_grid(color_grid):
     return "\n".join(lines)
 
 
-def auto_detect_grid(logger):
-    """Auto-detect the Bejeweled 3 grid by finding a square region of colorful gems."""
-    logger.info("Attempting to auto-detect game grid...")
+def find_grid_from_window(logger):
+    """Find the game grid using saved percentages and the game window position.
 
-    # Try to narrow search to the game window
-    search_region = None
-    offset_x, offset_y = 0, 0
-    region_screen_w, region_screen_h = pyautogui.size()
+    Uses grid_config.json if available (created by calibrate.py), otherwise
+    falls back to default percentages derived from Bejeweled 3's standard layout.
+    Returns (top_left, bottom_right) in screen coordinates, or None if the
+    game window is not found.
+    """
+    # Default percentages (Bejeweled 3 standard layout)
+    config = {
+        "left_pct": 0.329,
+        "top_pct": 0.087,
+        "right_pct": 0.980,
+        "bottom_pct": 0.924,
+    }
 
+    # Load custom calibration if available
+    config_path = os.path.join(os.path.dirname(__file__) or ".", "grid_config.json")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            saved = json.load(f)
+            config.update(saved)
+        logger.info("Loaded grid calibration from %s", config_path)
+    else:
+        logger.info("No grid_config.json found, using default percentages")
+        logger.info("Run calibrate.py for a precise fit")
+
+    # Find the game window
     try:
         import pygetwindow as gw
 
         windows = gw.getWindowsWithTitle("Bejeweled 3")
-        if windows:
-            win = windows[0]
-            if not win.isActive:
-                win.activate()
-                time.sleep(0.5)
-            search_region = (win.left, win.top, win.width, win.height)
-            offset_x, offset_y = win.left, win.top
-            region_screen_w, region_screen_h = win.width, win.height
-            logger.info("Found Bejeweled 3 window at (%d, %d, %dx%d)", *search_region)
+        if not windows:
+            logger.info("Bejeweled 3 window not found")
+            return None
+
+        win = windows[0]
+        if not win.isActive:
+            win.activate()
+            time.sleep(0.5)
+
+        logger.info(
+            "Found Bejeweled 3 window at (%d, %d, %dx%d)",
+            win.left, win.top, win.width, win.height,
+        )
+
+        top_left = (
+            int(win.left + win.width * config["left_pct"]),
+            int(win.top + win.height * config["top_pct"]),
+        )
+        bottom_right = (
+            int(win.left + win.width * config["right_pct"]),
+            int(win.top + win.height * config["bottom_pct"]),
+        )
+
+        logger.info(
+            "Grid from config: top-left=%s, bottom-right=%s (%dx%d)",
+            top_left,
+            bottom_right,
+            bottom_right[0] - top_left[0],
+            bottom_right[1] - top_left[1],
+        )
+        return top_left, bottom_right
+
     except ImportError:
-        pass
-
-    # Take screenshot
-    if search_region:
-        screenshot = pyautogui.screenshot(region=search_region)
-    else:
-        screenshot = pyautogui.screenshot()
-
-    img = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-
-    # DPI scale factor (screenshot pixels vs screen coordinates)
-    img_h, img_w = img.shape[:2]
-    scale_x = img_w / region_screen_w
-    scale_y = img_h / region_screen_h
-
-    # HIGH saturation threshold — captures gems but not background scenery (castle, sky)
-    sat_mask = ((hsv[:, :, 1] > 120) & (hsv[:, :, 2] > 80)).astype(np.uint8) * 255
-
-    # Close gaps between gems, but not large enough to bridge grid-to-sidebar
-    kernel_size = max(15, min(img_h, img_w) // 30)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
-    closed = cv2.morphologyEx(sat_mask, cv2.MORPH_CLOSE, kernel)
-
-    # Find contours
-    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        logger.info("Auto-detect failed: no colorful regions found")
+        logger.info("pygetwindow not available")
         return None
-
-    # Find the largest square contour big enough to be the 8x8 grid
-    min_area = img_h * img_w * 0.15
-    best = None
-    best_area = 0
-    for contour in contours:
-        x, y, w, h = cv2.boundingRect(contour)
-        area = w * h
-        aspect = min(w, h) / max(w, h)
-        if area > best_area and area > min_area and aspect > 0.85:
-            best = (x, y, w, h)
-            best_area = area
-
-    if best is None:
-        logger.info("Auto-detect failed: no square region found")
-        return None
-
-    x, y, w, h = best
-
-    # Convert image pixel coords to screen coords (handle DPI scaling)
-    top_left = (
-        int(offset_x + x / scale_x),
-        int(offset_y + y / scale_y),
-    )
-    bottom_right = (
-        int(offset_x + (x + w) / scale_x),
-        int(offset_y + (y + h) / scale_y),
-    )
-
-    # Trim 2% inward to avoid border decoration
-    grid_w = bottom_right[0] - top_left[0]
-    grid_h = bottom_right[1] - top_left[1]
-    margin_x = int(grid_w * 0.02)
-    margin_y = int(grid_h * 0.02)
-    top_left = (top_left[0] + margin_x, top_left[1] + margin_y)
-    bottom_right = (bottom_right[0] - margin_x, bottom_right[1] - margin_y)
-
-    logger.info(
-        "Auto-detected grid: top-left=%s, bottom-right=%s (%dx%d)",
-        top_left,
-        bottom_right,
-        bottom_right[0] - top_left[0],
-        bottom_right[1] - top_left[1],
-    )
-    return top_left, bottom_right
 
 
 def get_grid_coordinates():
@@ -447,7 +418,7 @@ def main():
     logger.info("BejeweledBot started (Bejeweled 3)")
 
     # Try auto-detection, fall back to manual calibration
-    coords = auto_detect_grid(logger)
+    coords = find_grid_from_window(logger)
     if coords:
         top_left, bottom_right = coords
     else:
@@ -463,6 +434,7 @@ def main():
     game_number = 1
     game_moves = 0
     start_time = time.time()
+    non_game_since = None  # When non-game screen was first detected
 
     logger.info("Game #%d started", game_number)
 
@@ -496,11 +468,28 @@ def main():
         # Check if this looks like a real game board
         valid, reason = is_valid_board(color_grid)
         if not valid:
-            logger.info("Non-game screen detected (%s)", reason)
+            if non_game_since is None:
+                non_game_since = time.time()
+                logger.info("Non-game screen detected (%s), waiting...", reason)
+
+            elapsed_non_game = time.time() - non_game_since
+
+            # Brief interruptions (level transitions, bonus animations) clear
+            # within a few seconds. Only pause if it persists 10+ seconds.
+            if elapsed_non_game < 10:
+                logger.debug(
+                    "Non-game screen for %.1fs, waiting...", elapsed_non_game
+                )
+                time.sleep(1.0)
+                continue
+
+            # Persistent non-game screen = game over
             logger.info(
-                "Game #%d ended with %d moves. Press Space to resume or Escape to quit.",
+                "Game #%d ended with %d moves (non-game screen for %.1fs). "
+                "Press Space to resume or Escape to quit.",
                 game_number,
                 game_moves,
+                elapsed_non_game,
             )
 
             # Pause until user presses Space or Escape
@@ -520,13 +509,14 @@ def main():
                     return
                 time.sleep(0.1)
 
+            non_game_since = None
             game_number += 1
             game_moves = 0
             last_move = None
             logger.info("Resuming - Game #%d", game_number)
 
             # Re-detect grid in case window moved
-            new_coords = auto_detect_grid(logger)
+            new_coords = find_grid_from_window(logger)
             if new_coords:
                 top_left, bottom_right = new_coords
                 logger.info(
@@ -535,6 +525,9 @@ def main():
                     bottom_right,
                 )
             continue
+
+        # Board is valid — reset non-game timer
+        non_game_since = None
 
         move, score = find_optimal_move(color_grid)
 
