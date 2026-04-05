@@ -4,6 +4,10 @@ logs/
 # Screenshots
 screenshots/
 
+# Gem captures
+unknown_gems/
+gem_library/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

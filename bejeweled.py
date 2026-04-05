@@ -110,8 +110,8 @@ def find_grid_from_window(logger):
     config = {
         "left_pct": 0.329,
         "top_pct": 0.087,
-        "right_pct": 0.980,
-        "bottom_pct": 0.924,
+        "right_pct": 0.970,
+        "bottom_pct": 0.914,
     }
 
     # Load custom calibration if available
@@ -234,12 +234,15 @@ def wait_for_stable_board(top_left, bottom_right, logger):
 
 def classify_hue(hue):
     """Classify an HSV hue value into a gem color name."""
-    if hue < 8 or hue > 170:
+    if hue < 8 or hue >= 170:
         return "red"
     for low, high, name in GEM_HUE_RANGES:
         if low <= hue < high:
             return name
     return ""
+
+
+_unknown_gem_timestamps = {}  # Throttle: track last save time per cell
 
 
 def identify_cell_color(grid_img, row, col):
@@ -271,7 +274,63 @@ def identify_cell_color(grid_img, row, col):
 
     # Classify by median hue of colorful pixels
     median_hue = int(np.median(h[color_mask]))
-    return row, col, classify_hue(median_hue)
+    color = classify_hue(median_hue)
+
+    if color:
+        return row, col, color
+
+    # Unknown gem — save screenshot for identification (throttled: max once per 5s per cell)
+    cell_key = (row, col)
+    now = time.time()
+    if now - _unknown_gem_timestamps.get(cell_key, 0) > 5:
+        _unknown_gem_timestamps[cell_key] = now
+        unknown_dir = os.path.join(os.path.dirname(__file__) or ".", "unknown_gems")
+        os.makedirs(unknown_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Save the full cell (not just center) for better visual identification
+        full_cell = grid_img[
+            row * cell_height : (row + 1) * cell_height,
+            col * cell_width : (col + 1) * cell_width,
+        ]
+        cv2.imwrite(os.path.join(unknown_dir, f"r{row}_c{col}_{ts}_h{median_hue}.png"), full_cell)
+
+    return row, col, ""
+
+
+_library_saved = set()  # Track which (color, hue) combos we've already saved
+
+
+def save_gem_library(grid_img, color_grid):
+    """Save one example screenshot per unique gem type encountered.
+
+    Saves to gem_library/<color>/ folders. Only saves new types not yet
+    in the library, so it builds up over time without duplicates.
+    """
+    cell_w = grid_img.shape[1] // GRID_SIZE
+    cell_h = grid_img.shape[0] // GRID_SIZE
+
+    for row in range(GRID_SIZE):
+        for col in range(GRID_SIZE):
+            color = color_grid[row][col]
+            if not color:
+                continue
+
+            # Only save one example per color (skip if we already have it)
+            if color in _library_saved:
+                continue
+            _library_saved.add(color)
+
+            color_dir = os.path.join(
+                os.path.dirname(__file__) or ".", "gem_library", color
+            )
+            os.makedirs(color_dir, exist_ok=True)
+
+            full_cell = grid_img[
+                row * cell_h : (row + 1) * cell_h,
+                col * cell_w : (col + 1) * cell_w,
+            ]
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            cv2.imwrite(os.path.join(color_dir, f"{color}_{ts}.png"), full_cell)
 
 
 def build_color_grid(grid_img):
@@ -316,11 +375,21 @@ def is_valid_board(color_grid):
     return True, ""
 
 
-def evaluate_state(grid):
-    """Score the grid based on consecutive matching gems (3+ in a row/column)."""
-    score = 0
+# Scoring weights based on Bejeweled 3 actual point values
+MATCH_WEIGHTS = {3: 50, 4: 100, 5: 500}  # 4=Flame Gem, 5=Hypercube
+STAR_GEM_BONUS = 150  # L/T match creating a Star Gem
+CASCADE_BASE_BONUS = 50  # Increases by 50 per cascade level
+BOTTOM_ROW_BONUS = 2  # Small tiebreaker per row toward bottom
 
-    # Check rows
+
+def find_matches(grid):
+    """Find all matches on the grid. Returns list of (row, col, length, direction).
+
+    direction is 'h' for horizontal, 'v' for vertical.
+    """
+    matches = []
+
+    # Horizontal matches
     for row in range(GRID_SIZE):
         col = 0
         while col < GRID_SIZE:
@@ -328,14 +397,14 @@ def evaluate_state(grid):
             if not color:
                 col += 1
                 continue
-            run_length = 1
-            while col + run_length < GRID_SIZE and grid[row][col + run_length] == color:
-                run_length += 1
-            if run_length >= 3:
-                score += run_length
-            col += run_length
+            run = 1
+            while col + run < GRID_SIZE and grid[row][col + run] == color:
+                run += 1
+            if run >= 3:
+                matches.append((row, col, run, "h"))
+            col += run
 
-    # Check columns
+    # Vertical matches
     for col in range(GRID_SIZE):
         row = 0
         while row < GRID_SIZE:
@@ -343,14 +412,89 @@ def evaluate_state(grid):
             if not color:
                 row += 1
                 continue
-            run_length = 1
-            while row + run_length < GRID_SIZE and grid[row + run_length][col] == color:
-                run_length += 1
-            if run_length >= 3:
-                score += run_length
-            row += run_length
+            run = 1
+            while row + run < GRID_SIZE and grid[row + run][col] == color:
+                run += 1
+            if run >= 3:
+                matches.append((row, col, run, "v"))
+            row += run
 
-    return score
+    return matches
+
+
+def detect_star_gems(matches):
+    """Count Star Gem formations (L/T/+ shapes where horizontal and vertical matches share a cell)."""
+    h_cells = set()
+    v_cells = set()
+    for row, col, length, direction in matches:
+        for i in range(length):
+            if direction == "h":
+                h_cells.add((row, col + i))
+            else:
+                v_cells.add((row + i, col))
+    return len(h_cells & v_cells)
+
+
+def clear_matches(grid, matches):
+    """Clear matched gems from the grid (set to empty string)."""
+    for row, col, length, direction in matches:
+        for i in range(length):
+            if direction == "h":
+                grid[row][col + i] = ""
+            else:
+                grid[row + i][col] = ""
+
+
+def apply_gravity(grid):
+    """Drop gems down to fill empty spaces. Empty cells bubble to the top."""
+    for col in range(GRID_SIZE):
+        # Collect non-empty cells from bottom to top
+        gems = [grid[row][col] for row in range(GRID_SIZE - 1, -1, -1) if grid[row][col]]
+        # Fill column from bottom
+        for row in range(GRID_SIZE - 1, -1, -1):
+            idx = GRID_SIZE - 1 - row
+            grid[row][col] = gems[idx] if idx < len(gems) else ""
+
+
+def evaluate_state(grid):
+    """Score the grid using Bejeweled 3 point values with cascade simulation.
+
+    Scores match types by their actual game value:
+    - Match-3: 50 pts
+    - Match-4 (Flame Gem): 100 pts
+    - Match-5 (Hypercube): 500 pts
+    - L/T intersection (Star Gem): +150 pts bonus
+    - Cascades: +50, +100, +150... stacking bonus per level
+    """
+    grid = [r[:] for r in grid]  # Deep copy for simulation
+    total_score = 0
+    cascade_level = 0
+
+    while True:
+        matches = find_matches(grid)
+        if not matches:
+            break
+
+        # Score each match by length
+        match_score = 0
+        for _, _, length, _ in matches:
+            capped = min(length, 5)
+            match_score += MATCH_WEIGHTS.get(capped, MATCH_WEIGHTS[5])
+
+        # Star Gem bonus for L/T intersections
+        star_count = detect_star_gems(matches)
+        match_score += star_count * STAR_GEM_BONUS
+
+        # Cascade bonus (increases each level)
+        cascade_bonus = cascade_level * CASCADE_BASE_BONUS
+        total_score += match_score + cascade_bonus
+
+        # Simulate: clear matches and apply gravity
+        clear_matches(grid, matches)
+        apply_gravity(grid)
+        cascade_level += 1
+
+    return total_score
 
 
 def evaluate_move(color_grid, row, col, direction):
@@ -359,26 +503,42 @@ def evaluate_move(color_grid, row, col, direction):
 
     if direction == "right":
         grid[row][col], grid[row][col + 1] = grid[row][col + 1], grid[row][col]
-        return evaluate_state(grid), (row, col, row, col + 1)
+        score = evaluate_state(grid)
+        # Tiebreaker: prefer moves lower on the board (more cascade potential)
+        score += row * BOTTOM_ROW_BONUS
+        return score, (row, col, row, col + 1)
 
     grid[row][col], grid[row + 1][col] = grid[row + 1][col], grid[row][col]
-    return evaluate_state(grid), (row, col, row + 1, col)
+    score = evaluate_state(grid)
+    score += row * BOTTOM_ROW_BONUS
+    return score, (row, col, row + 1, col)
 
 
-def find_optimal_move(color_grid):
-    """Find the move producing the highest score. Returns (move_tuple, score) or (None, 0)."""
+def find_optimal_move(color_grid, failed_moves=None):
+    """Find the move producing the highest score. Returns (move_tuple, score) or (None, 0).
+
+    failed_moves: set of move tuples to skip (moves that have been tried
+    repeatedly without the board changing, likely involving special gems).
+    """
+    if failed_moves is None:
+        failed_moves = set()
+
     best_move = None
     best_score = 0
 
     moves = []
-    for row in range(GRID_SIZE - 1, -1, -1):
+    for row in range(GRID_SIZE):
         for col in range(GRID_SIZE):
             if not color_grid[row][col]:
                 continue
             if col < GRID_SIZE - 1:
-                moves.append((color_grid, row, col, "right"))
+                move_tuple = (row, col, row, col + 1)
+                if move_tuple not in failed_moves:
+                    moves.append((color_grid, row, col, "right"))
             if row < GRID_SIZE - 1:
-                moves.append((color_grid, row, col, "down"))
+                move_tuple = (row, col, row + 1, col)
+                if move_tuple not in failed_moves:
+                    moves.append((color_grid, row, col, "down"))
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = [executor.submit(evaluate_move, *args) for args in moves]
@@ -435,6 +595,9 @@ def main():
     game_moves = 0
     start_time = time.time()
     non_game_since = None  # When non-game screen was first detected
+    move_history = []  # Track recent moves to detect stuck loops
+    failed_moves = set()  # Moves to skip (tried repeatedly without effect)
+    prev_grid_state = None  # Track board state to clear blacklist on change
 
     logger.info("Game #%d started", game_number)
 
@@ -444,6 +607,24 @@ def main():
 
         raw_image = capture_raw(top_left, bottom_right)
         color_grid = build_color_grid(raw_image)
+
+        # Build gem screenshot library (saves one example per color type)
+        save_gem_library(raw_image, color_grid)
+
+        # P: snapshot all 64 cells for manual review (catches special gems)
+        if keyboard.is_pressed("p"):
+            snap_dir = os.path.join(os.path.dirname(__file__) or ".", "gem_library", "snapshot")
+            os.makedirs(snap_dir, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            cell_w = raw_image.shape[1] // GRID_SIZE
+            cell_h = raw_image.shape[0] // GRID_SIZE
+            for r in range(GRID_SIZE):
+                for c in range(GRID_SIZE):
+                    cell_img = raw_image[r * cell_h : (r + 1) * cell_h, c * cell_w : (c + 1) * cell_w]
+                    color = color_grid[r][c] or "empty"
+                    cv2.imwrite(os.path.join(snap_dir, f"{ts}_r{r}_c{c}_{color}.png"), cell_img)
+            logger.info("Snapshot: saved 64 cells to gem_library/snapshot/")
+            time.sleep(0.5)  # Debounce
 
         # Show overlay for visual feedback
         display_image = add_grid_overlay(raw_image.copy())
@@ -513,6 +694,8 @@ def main():
             game_number += 1
             game_moves = 0
             last_move = None
+            move_history.clear()
+            failed_moves.clear()
             logger.info("Resuming - Game #%d", game_number)
 
             # Re-detect grid in case window moved
@@ -529,23 +712,53 @@ def main():
         # Board is valid — reset non-game timer
         non_game_since = None
 
-        move, score = find_optimal_move(color_grid)
+        # Clear blacklist when the board state changes (new gems fell, cascades, etc.)
+        grid_state = tuple(tuple(row) for row in color_grid)
+        if grid_state != prev_grid_state:
+            if failed_moves:
+                logger.debug("Board changed, clearing %d blacklisted moves", len(failed_moves))
+            failed_moves.clear()
+            move_history.clear()
+            prev_grid_state = grid_state
+
+        move, score = find_optimal_move(color_grid, failed_moves)
 
         if move:
             from_row, from_col, to_row, to_col = move
 
-            # Stuck detection: compare with previous move before executing
-            is_repeat = last_move == move
-            if is_repeat:
-                logger.info("Repeat move detected, adding delay")
-                time.sleep(0.3)
+            # Track move history for stuck loop detection
+            move_history.append(move)
+            if len(move_history) > 10:
+                move_history.pop(0)
+
+            # Count how many times this move appears in recent history
+            repeat_count = move_history.count(move)
+
+            if repeat_count >= 3:
+                # This move has been tried 3+ times recently without effect
+                # — likely involves a special gem the bot can't identify
+                failed_moves.add(move)
+                logger.info(
+                    "Move [%d,%d]->[%d,%d] stuck %d times, blacklisting",
+                    *move, repeat_count,
+                )
+                # Try to find a different move immediately
+                move, score = find_optimal_move(color_grid, failed_moves)
+                if not move:
+                    logger.info("No alternative moves, clearing blacklist")
+                    failed_moves.clear()
+                    move_history.clear()
+                    time.sleep(0.5)
+                    continue
+
+                from_row, from_col, to_row, to_col = move
 
             move_count += 1
             game_moves += 1
             src_color = color_grid[from_row][from_col]
             dest_color = color_grid[to_row][to_col]
             logger.info(
-                "Move #%d: [%d,%d] (%s) -> [%d,%d] (%s) | score=%d%s",
+                "Move #%d: [%d,%d] (%s) -> [%d,%d] (%s) | score=%d",
                 move_count,
                 from_row,
                 from_col,
@@ -554,7 +767,6 @@ def main():
                 to_col,
                 dest_color,
                 score,
-                " (repeat)" if is_repeat else "",
             )
 
             perform_move(top_left, bottom_right, from_row, from_col, to_row, to_col)
