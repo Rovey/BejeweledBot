@@ -52,7 +52,8 @@ MAX_SINGLE_COLOR_RATIO = 0.55
 MIN_DISTINCT_COLORS = 4
 
 # Special gem detection thresholds (calibrated from gem_library captures)
-SPECIAL_BORDER_V_THRESHOLD = 120  # Regular max 104, special min 140
+SPECIAL_BORDER_V_THRESHOLD = 130  # Regular max 104, special min 140 (raised from 120 to avoid hint glow)
+HYPERCUBE_BORDER_V_THRESHOLD = 150  # Hypercube 166, hint glow ~125-145 (extra check to prevent false positives)
 HYPERCUBE_BORDER_S_THRESHOLD = 90  # Hypercube 73, next lowest 102
 FLAME_HUE_STD_THRESHOLD = 35  # Flame min 43, star max 30
 
@@ -299,8 +300,9 @@ def classify_special(cell_bgr):
 
     border_s = float(np.mean(s[border_mask]))
 
-    # Hypercube: multicolor metallic = low border saturation
-    if border_s < HYPERCUBE_BORDER_S_THRESHOLD:
+    # Hypercube: multicolor metallic = low border saturation AND very bright
+    # (extra brightness check prevents hint glow false positives)
+    if border_s < HYPERCUBE_BORDER_S_THRESHOLD and border_v > HYPERCUBE_BORDER_V_THRESHOLD:
         return "hypercube"
 
     # Flame vs Star: flames have high hue variance (warm fire colors),
@@ -870,18 +872,50 @@ def main():
         # Board is valid — reset non-game timer
         non_game_since = None
 
-        # Clear blacklist when the board state changes (new gems fell, cascades, etc.)
+        # Clear blacklist only on significant board changes (4+ cells = real cascade).
+        # Minor flickers (1-2 cells from hint glow) should NOT reset the blacklist.
         grid_state = tuple(tuple(row) for row in color_grid)
         if grid_state != prev_grid_state:
-            if failed_moves:
-                logger.debug("Board changed, clearing %d blacklisted moves", len(failed_moves))
-            failed_moves.clear()
-            move_history.clear()
+            if prev_grid_state:
+                changes = sum(
+                    a != b
+                    for row_a, row_b in zip(grid_state, prev_grid_state)
+                    for a, b in zip(row_a, row_b)
+                )
+                if changes >= 4:
+                    if failed_moves:
+                        logger.debug(
+                            "Board changed (%d cells), clearing %d blacklisted moves",
+                            changes,
+                            len(failed_moves),
+                        )
+                    failed_moves.clear()
+                    move_history.clear()
             prev_grid_state = grid_state
 
         move, score = find_optimal_move(color_grid, failed_moves)
 
         if move:
+            # --- Double-scan validation ---
+            # Re-capture and verify the board hasn't changed significantly since
+            # we planned. Minor flickers (1-3 cells from hint glow) are OK.
+            raw_image2 = capture_raw(top_left, bottom_right)
+            color_grid2 = build_color_grid(raw_image2)
+            grid_state2 = tuple(tuple(row) for row in color_grid2)
+
+            if grid_state2 != grid_state:
+                changes = sum(
+                    a != b
+                    for row_a, row_b in zip(grid_state, grid_state2)
+                    for a, b in zip(row_a, row_b)
+                )
+                if changes >= 4:
+                    logger.debug(
+                        "Board changed during planning (%d cells), re-scanning",
+                        changes,
+                    )
+                    continue
+
             from_row, from_col, to_row, to_col = move
 
             # Track move history for stuck loop detection
@@ -894,13 +928,11 @@ def main():
 
             if repeat_count >= 3:
                 # This move has been tried 3+ times recently without effect
-                # — likely involves a special gem the bot can't identify
                 failed_moves.add(move)
                 logger.info(
                     "Move [%d,%d]->[%d,%d] stuck %d times, blacklisting",
                     *move, repeat_count,
                 )
-                # Try to find a different move immediately
                 move, score = find_optimal_move(color_grid, failed_moves)
                 if not move:
                     logger.info("No alternative moves, clearing blacklist")
@@ -910,6 +942,10 @@ def main():
                     continue
 
                 from_row, from_col, to_row, to_col = move
+                # Track replacement move too so IT can also be blacklisted
+                move_history.append(move)
+                if len(move_history) > 10:
+                    move_history.pop(0)
 
             move_count += 1
             game_moves += 1
