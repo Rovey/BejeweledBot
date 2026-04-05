@@ -665,6 +665,11 @@ def evaluate_move(color_grid, row, col, direction):
     # Step 1: evaluate this move
     step1_score, resulting_grid = simulate_move(color_grid, row, col, direction)
 
+    # In Bejeweled, a swap is only valid if it creates an immediate match.
+    # If step1 scores 0 (no match), the game rejects the move entirely.
+    if step1_score == 0:
+        return 0, move
+
     # Step 2: best follow-up move on the resulting board (discounted by 50%)
     step2_score = best_next_score(resulting_grid)
     total = step1_score + step2_score // 2
