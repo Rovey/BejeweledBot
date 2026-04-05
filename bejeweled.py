@@ -583,36 +583,93 @@ def evaluate_state(grid):
     return total_score
 
 
-def evaluate_move(color_grid, row, col, direction):
-    """Evaluate a move on a copy of the grid. Returns (score, move_tuple)."""
-    grid = [r[:] for r in color_grid]
+def simulate_move(grid, row, col, direction):
+    """Apply a swap on a grid copy, run cascades, return (score, resulting_grid).
+
+    The resulting grid has empty spaces where gems were cleared (pessimistic:
+    no new gems fall from above, only existing gems drop via gravity).
+    """
+    grid = [r[:] for r in grid]
 
     if direction == "right":
         src, dst = grid[row][col], grid[row][col + 1]
         grid[row][col], grid[row][col + 1] = dst, src
-        move = (row, col, row, col + 1)
     else:
         src, dst = grid[row][col], grid[row + 1][col]
         grid[row][col], grid[row + 1][col] = dst, src
-        move = (row, col, row + 1, col)
 
     score = evaluate_state(grid)
 
     # Special gem bonuses
     if src == "hypercube" or dst == "hypercube":
-        # Hypercube swap is always valid and clears an entire color
         score += HYPERCUBE_SWAP_BONUS
     elif score > 0:
-        # Add detonation bonus when a match involves special gems
         for gem in (src, dst):
             if gem and "_flame" in gem:
                 score += FLAME_MATCH_BONUS
             elif gem and "_star" in gem:
                 score += STAR_MATCH_BONUS
 
+    # Simulate cascades to get the resulting board state
+    while True:
+        matches = find_matches(grid)
+        if not matches:
+            break
+        clear_matches(grid, matches)
+        apply_gravity(grid)
+
+    return score, grid
+
+
+def best_next_score(grid):
+    """Find the best single-move score on a board state (for look-ahead)."""
+    best = 0
+    for row in range(GRID_SIZE):
+        for col in range(GRID_SIZE):
+            bc = gem_base_color(grid[row][col])
+            if not bc:
+                continue
+            if col < GRID_SIZE - 1 and grid[row][col + 1]:
+                g = [r[:] for r in grid]
+                g[row][col], g[row][col + 1] = g[row][col + 1], g[row][col]
+                s = evaluate_state(g)
+                if g[row][col] == "hypercube" or g[row][col + 1] == "hypercube":
+                    s += HYPERCUBE_SWAP_BONUS
+                if s > best:
+                    best = s
+            if row < GRID_SIZE - 1 and grid[row + 1][col]:
+                g = [r[:] for r in grid]
+                g[row][col], g[row + 1][col] = g[row + 1][col], g[row][col]
+                s = evaluate_state(g)
+                if g[row][col] == "hypercube" or g[row + 1][col] == "hypercube":
+                    s += HYPERCUBE_SWAP_BONUS
+                if s > best:
+                    best = s
+    return best
+
+
+def evaluate_move(color_grid, row, col, direction):
+    """Evaluate a move with 2-step look-ahead. Returns (score, move_tuple).
+
+    Step 1: simulate the move and its cascades, get score and resulting board.
+    Step 2: on the resulting board (empty spaces stay empty), find the best
+    possible follow-up move and add its score (discounted).
+    """
+    if direction == "right":
+        move = (row, col, row, col + 1)
+    else:
+        move = (row, col, row + 1, col)
+
+    # Step 1: evaluate this move
+    step1_score, resulting_grid = simulate_move(color_grid, row, col, direction)
+
+    # Step 2: best follow-up move on the resulting board (discounted by 50%)
+    step2_score = best_next_score(resulting_grid)
+    total = step1_score + step2_score // 2
+
     # Tiebreaker: prefer moves lower on the board (more cascade potential)
-    score += row * BOTTOM_ROW_BONUS
-    return score, move
+    total += row * BOTTOM_ROW_BONUS
+    return total, move
 
 
 def find_optimal_move(color_grid, failed_moves=None):
