@@ -51,6 +51,16 @@ MAX_SINGLE_COLOR_RATIO = 0.55
 # Minimum number of distinct colors for a valid game board
 MIN_DISTINCT_COLORS = 4
 
+# Special gem detection thresholds (calibrated from gem_library captures)
+SPECIAL_BORDER_V_THRESHOLD = 120  # Regular max 104, special min 140
+HYPERCUBE_BORDER_S_THRESHOLD = 90  # Hypercube 73, next lowest 102
+FLAME_HUE_STD_THRESHOLD = 35  # Flame min 43, star max 30
+
+# Bonus scores for moves involving special gems
+HYPERCUBE_SWAP_BONUS = 1000  # Clears entire color (moderate: save for emergencies)
+FLAME_MATCH_BONUS = 200  # 3x3 explosion (~8 extra gems)
+STAR_MATCH_BONUS = 400  # Cross detonation (~14 extra gems)
+
 # Single-letter abbreviations for log output
 COLOR_ABBREV = {
     "blue": "B",
@@ -60,6 +70,7 @@ COLOR_ABBREV = {
     "orange": "O",
     "yellow": "Y",
     "white": "W",
+    "hypercube": "H",
 }
 
 
@@ -90,11 +101,26 @@ def setup_logger():
 
 
 def format_grid(color_grid):
-    """Format the color grid as a compact string for logging."""
-    lines = ["  " + " ".join(str(c) for c in range(GRID_SIZE))]
+    """Format the color grid as a compact string for logging.
+
+    Regular gems: uppercase (R, B, G, ...). Flame: lowercase (r, b, g, ...).
+    Star: uppercase + * (R*, B*). Hypercube: H. Unknown: dot.
+    """
+    lines = ["   " + "  ".join(str(c) for c in range(GRID_SIZE))]
     for row_idx, row in enumerate(color_grid):
-        cells = " ".join(COLOR_ABBREV.get(c, ".") for c in row)
-        lines.append(f"{row_idx} {cells}")
+        cells = []
+        for c in row:
+            if not c:
+                cells.append(" .")
+            elif c == "hypercube":
+                cells.append(" H")
+            elif c.endswith("_flame"):
+                cells.append(" " + COLOR_ABBREV.get(gem_base_color(c), "?").lower())
+            elif c.endswith("_star"):
+                cells.append(COLOR_ABBREV.get(gem_base_color(c), "?") + "*")
+            else:
+                cells.append(" " + COLOR_ABBREV.get(c, "?"))
+        lines.append(f"{row_idx} " + " ".join(cells))
     return "\n".join(lines)
 
 
@@ -232,6 +258,13 @@ def wait_for_stable_board(top_left, bottom_right, logger):
     return False
 
 
+def gem_base_color(gem_name):
+    """Extract base color from a gem name (e.g., 'red_flame' -> 'red')."""
+    if not gem_name or gem_name == "hypercube":
+        return gem_name
+    return gem_name.split("_")[0]
+
+
 def classify_hue(hue):
     """Classify an HSV hue value into a gem color name."""
     if hue < 8 or hue >= 170:
@@ -239,6 +272,46 @@ def classify_hue(hue):
     for low, high, name in GEM_HUE_RANGES:
         if low <= hue < high:
             return name
+
+
+def classify_special(cell_bgr):
+    """Classify a gem cell as regular, flame, star, or hypercube.
+
+    Analyzes the border region (outer 25% ring) of the cell:
+    - Regular gems have dark borders (background)
+    - Flame gems have bright, saturated orange/yellow fire aura
+    - Star gems have bright, desaturated white/blue glow
+    - Hypercube has bright border with low saturation (multicolor metallic)
+    """
+    hsv = cv2.cvtColor(cell_bgr, cv2.COLOR_BGR2HSV)
+    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    cell_h, cell_w = cell_bgr.shape[:2]
+
+    # Border = outer ring (everything outside center 50%)
+    border_mask = np.ones((cell_h, cell_w), dtype=bool)
+    border_mask[cell_h // 4 : cell_h * 3 // 4, cell_w // 4 : cell_w * 3 // 4] = False
+
+    border_v = float(np.mean(v[border_mask]))
+
+    # Regular gems have dark borders
+    if border_v < SPECIAL_BORDER_V_THRESHOLD:
+        return "regular"
+
+    border_s = float(np.mean(s[border_mask]))
+
+    # Hypercube: multicolor metallic = low border saturation
+    if border_s < HYPERCUBE_BORDER_S_THRESHOLD:
+        return "hypercube"
+
+    # Flame vs Star: flames have high hue variance (warm fire colors),
+    # stars have low hue variance (uniform white/blue glow)
+    color_mask = (s > 60) & (v > 60)
+    if np.count_nonzero(color_mask) > 10:
+        hue_std = float(np.std(h[color_mask]))
+        if hue_std > FLAME_HUE_STD_THRESHOLD:
+            return "flame"
+
+    return "star"
     return ""
 
 
@@ -246,18 +319,32 @@ _unknown_gem_timestamps = {}  # Throttle: track last save time per cell
 
 
 def identify_cell_color(grid_img, row, col):
-    """Identify gem color using HSV analysis of the cell center. Returns (row, col, color_name)."""
+    """Identify gem color and special type. Returns (row, col, gem_name).
+
+    gem_name is one of: 'red', 'blue', ..., 'red_flame', 'blue_star', 'hypercube', or ''.
+    """
     cell_width = grid_img.shape[1] // GRID_SIZE
     cell_height = grid_img.shape[0] // GRID_SIZE
 
-    # Extract center 50% of cell to avoid edges and neighboring gems
-    y_start = row * cell_height + cell_height // 4
-    y_end = (row + 1) * cell_height - cell_height // 4
-    x_start = col * cell_width + cell_width // 4
-    x_end = (col + 1) * cell_width - cell_width // 4
+    # Full cell for special gem detection
+    full_cell = grid_img[
+        row * cell_height : (row + 1) * cell_height,
+        col * cell_width : (col + 1) * cell_width,
+    ]
 
-    cell = grid_img[y_start:y_end, x_start:x_end]
-    hsv = cv2.cvtColor(cell, cv2.COLOR_BGR2HSV)
+    # Check for special gem type (uses border glow analysis)
+    special = classify_special(full_cell)
+
+    # Hypercube has no base color — return immediately
+    if special == "hypercube":
+        return row, col, "hypercube"
+
+    # Center 50% for base color classification
+    center = full_cell[
+        cell_height // 4 : cell_height - cell_height // 4,
+        cell_width // 4 : cell_width - cell_width // 4,
+    ]
+    hsv = cv2.cvtColor(center, cv2.COLOR_BGR2HSV)
 
     h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
     total_pixels = h.size
@@ -265,36 +352,31 @@ def identify_cell_color(grid_img, row, col):
     # Check for white first (high brightness, low saturation)
     white_mask = (s < WHITE_MAX_SAT) & (v > WHITE_MIN_VAL)
     if np.count_nonzero(white_mask) > total_pixels * MIN_COLOR_RATIO:
-        return row, col, "white"
+        base = "white"
+    else:
+        # Filter for colorful, bright pixels
+        color_mask = (s > MIN_SATURATION) & (v > MIN_VALUE)
+        if np.count_nonzero(color_mask) < total_pixels * MIN_COLOR_RATIO:
+            # Unknown — save screenshot for identification (throttled)
+            cell_key = (row, col)
+            now = time.time()
+            if now - _unknown_gem_timestamps.get(cell_key, 0) > 5:
+                _unknown_gem_timestamps[cell_key] = now
+                unknown_dir = os.path.join(os.path.dirname(__file__) or ".", "unknown_gems")
+                os.makedirs(unknown_dir, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                cv2.imwrite(os.path.join(unknown_dir, f"r{row}_c{col}_{ts}.png"), full_cell)
+            return row, col, ""
 
-    # Filter for colorful, bright pixels
-    color_mask = (s > MIN_SATURATION) & (v > MIN_VALUE)
-    if np.count_nonzero(color_mask) < total_pixels * MIN_COLOR_RATIO:
-        return row, col, ""  # Not enough colorful pixels - empty or animating
+        median_hue = int(np.median(h[color_mask]))
+        base = classify_hue(median_hue)
+        if not base:
+            return row, col, ""
 
-    # Classify by median hue of colorful pixels
-    median_hue = int(np.median(h[color_mask]))
-    color = classify_hue(median_hue)
-
-    if color:
-        return row, col, color
-
-    # Unknown gem — save screenshot for identification (throttled: max once per 5s per cell)
-    cell_key = (row, col)
-    now = time.time()
-    if now - _unknown_gem_timestamps.get(cell_key, 0) > 5:
-        _unknown_gem_timestamps[cell_key] = now
-        unknown_dir = os.path.join(os.path.dirname(__file__) or ".", "unknown_gems")
-        os.makedirs(unknown_dir, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Save the full cell (not just center) for better visual identification
-        full_cell = grid_img[
-            row * cell_height : (row + 1) * cell_height,
-            col * cell_width : (col + 1) * cell_width,
-        ]
-        cv2.imwrite(os.path.join(unknown_dir, f"r{row}_c{col}_{ts}_h{median_hue}.png"), full_cell)
-
-    return row, col, ""
+    # Combine base color with special type
+    if special in ("flame", "star"):
+        return row, col, f"{base}_{special}"
+    return row, col, base
 
 
 _library_saved = set()  # Track which (color, hue) combos we've already saved
@@ -356,7 +438,8 @@ def is_valid_board(color_grid):
     for row in color_grid:
         for c in row:
             if c:
-                color_counts[c] = color_counts.get(c, 0) + 1
+                bc = gem_base_color(c)
+                color_counts[bc] = color_counts.get(bc, 0) + 1
 
     if not color_counts:
         return False, "no colors detected"
@@ -385,7 +468,8 @@ BOTTOM_ROW_BONUS = 2  # Small tiebreaker per row toward bottom
 def find_matches(grid):
     """Find all matches on the grid. Returns list of (row, col, length, direction).
 
-    direction is 'h' for horizontal, 'v' for vertical.
+    Compares gems by base color (red_flame matches with red and red_star).
+    Hypercubes don't form line matches. direction is 'h' or 'v'.
     """
     matches = []
 
@@ -394,11 +478,12 @@ def find_matches(grid):
         col = 0
         while col < GRID_SIZE:
             color = grid[row][col]
-            if not color:
+            bc = gem_base_color(color)
+            if not bc or bc == "hypercube":
                 col += 1
                 continue
             run = 1
-            while col + run < GRID_SIZE and grid[row][col + run] == color:
+            while col + run < GRID_SIZE and gem_base_color(grid[row][col + run]) == bc:
                 run += 1
             if run >= 3:
                 matches.append((row, col, run, "h"))
@@ -409,11 +494,12 @@ def find_matches(grid):
         row = 0
         while row < GRID_SIZE:
             color = grid[row][col]
-            if not color:
+            bc = gem_base_color(color)
+            if not bc or bc == "hypercube":
                 row += 1
                 continue
             run = 1
-            while row + run < GRID_SIZE and grid[row + run][col] == color:
+            while row + run < GRID_SIZE and gem_base_color(grid[row + run][col]) == bc:
                 run += 1
             if run >= 3:
                 matches.append((row, col, run, "v"))
@@ -502,16 +588,31 @@ def evaluate_move(color_grid, row, col, direction):
     grid = [r[:] for r in color_grid]
 
     if direction == "right":
-        grid[row][col], grid[row][col + 1] = grid[row][col + 1], grid[row][col]
-        score = evaluate_state(grid)
-        # Tiebreaker: prefer moves lower on the board (more cascade potential)
-        score += row * BOTTOM_ROW_BONUS
-        return score, (row, col, row, col + 1)
+        src, dst = grid[row][col], grid[row][col + 1]
+        grid[row][col], grid[row][col + 1] = dst, src
+        move = (row, col, row, col + 1)
+    else:
+        src, dst = grid[row][col], grid[row + 1][col]
+        grid[row][col], grid[row + 1][col] = dst, src
+        move = (row, col, row + 1, col)
 
-    grid[row][col], grid[row + 1][col] = grid[row + 1][col], grid[row][col]
     score = evaluate_state(grid)
+
+    # Special gem bonuses
+    if src == "hypercube" or dst == "hypercube":
+        # Hypercube swap is always valid and clears an entire color
+        score += HYPERCUBE_SWAP_BONUS
+    elif score > 0:
+        # Add detonation bonus when a match involves special gems
+        for gem in (src, dst):
+            if gem and "_flame" in gem:
+                score += FLAME_MATCH_BONUS
+            elif gem and "_star" in gem:
+                score += STAR_MATCH_BONUS
+
+    # Tiebreaker: prefer moves lower on the board (more cascade potential)
     score += row * BOTTOM_ROW_BONUS
-    return score, (row, col, row + 1, col)
+    return score, move
 
 
 def find_optimal_move(color_grid, failed_moves=None):
