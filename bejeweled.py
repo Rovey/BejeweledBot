@@ -300,10 +300,19 @@ def classify_special(cell_bgr):
 
     border_s = float(np.mean(s[border_mask]))
 
-    # Hypercube: multicolor metallic = low border saturation AND very bright
-    # (extra brightness check prevents hint glow false positives)
+    # Hypercube candidate: low border saturation AND very bright.
+    # Extra check: the CENTER must also have multiple distinct colors (yellow/green/purple).
+    # This prevents white flames (single color + low saturation glow) from being
+    # misidentified as hypercubes.
     if border_s < HYPERCUBE_BORDER_S_THRESHOLD and border_v > HYPERCUBE_BORDER_V_THRESHOLD:
-        return "hypercube"
+        center = hsv[cell_h // 4 : cell_h * 3 // 4, cell_w // 4 : cell_w * 3 // 4]
+        ch, cs, cv = center[:, :, 0], center[:, :, 1], center[:, :, 2]
+        bright_mask = (cs > 40) & (cv > 40)
+        if np.count_nonzero(bright_mask) > 10:
+            center_hue_std = float(np.std(ch[bright_mask]))
+            if center_hue_std > 35:
+                return "hypercube"
+        # Low border saturation but single-color center = white flame/star
 
     # Flame vs Star: flames have high hue variance (warm fire colors),
     # stars have low hue variance (uniform white/blue glow)
@@ -902,8 +911,10 @@ def main():
 
         if move:
             # --- Double-scan validation ---
-            # Re-capture and verify the board hasn't changed significantly since
-            # we planned. Minor flickers (1-3 cells from hint glow) are OK.
+            # Wait briefly then re-capture to ensure no animation is playing.
+            # Without this delay, we might screenshot mid-animation and see
+            # a false-stable board that matches the first scan by coincidence.
+            time.sleep(0.7)
             raw_image2 = capture_raw(top_left, bottom_right)
             color_grid2 = build_color_grid(raw_image2)
             grid_state2 = tuple(tuple(row) for row in color_grid2)
@@ -932,11 +943,21 @@ def main():
             repeat_count = move_history.count(move)
 
             if repeat_count >= 3:
-                # This move has been tried 3+ times recently without effect
-                failed_moves.add(move)
+                # This move has been tried 3+ times recently without effect.
+                # Blacklist ALL moves involving these cells (not just this swap
+                # direction) to force the bot to try a different area of the board.
+                r1, c1, r2, c2 = move
+                for cell_r, cell_c in ((r1, c1), (r2, c2)):
+                    for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                        nr, nc = cell_r + dr, cell_c + dc
+                        if 0 <= nr < GRID_SIZE and 0 <= nc < GRID_SIZE:
+                            if dr == 0:  # horizontal
+                                failed_moves.add((cell_r, min(cell_c, nc), cell_r, max(cell_c, nc)))
+                            else:  # vertical
+                                failed_moves.add((min(cell_r, nr), cell_c, max(cell_r, nr), cell_c))
                 logger.info(
-                    "Move [%d,%d]->[%d,%d] stuck %d times, blacklisting",
-                    *move, repeat_count,
+                    "Move [%d,%d]->[%d,%d] stuck %d times, blacklisting area (%d moves blocked)",
+                    *move, repeat_count, len(failed_moves),
                 )
                 move, score = find_optimal_move(color_grid, failed_moves)
                 if not move:
