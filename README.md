@@ -7,7 +7,7 @@ BejeweledBot is an automated bot that plays Bejeweled 3 (Steam). It captures the
 1. **Grid Detection**: Finds the Bejeweled 3 window and calculates the grid position using calibrated percentages (or manual corner clicks as fallback).
 2. **Color Recognition**: Identifies gem colors using HSV color space analysis. Detects special gems (Flame, Star, Hypercube) by analyzing the border glow around each cell.
 3. **Move Evaluation**: Scores every possible swap using Bejeweled 3's actual point values (match-3: 50, match-4: 100, match-5: 500, Star Gem: +150, cascades: stacking +50 bonus). A 2-step look-ahead evaluates what follow-up moves become available after cascades settle.
-4. **Move Execution**: Performs the highest-scoring valid move via mouse clicks, waits for animations to finish, then repeats.
+4. **Move Execution**: Performs the highest-scoring valid move via `SendMessage` (mouse stays free), waits for animations to finish, then repeats.
 
 ## Features
 - **Special gem detection**: Identifies Flame Gems, Star Gems, and Hypercubes by their visual glow patterns
@@ -24,7 +24,13 @@ BejeweledBot is an automated bot that plays Bejeweled 3 (Steam). It captures the
 pip install -r requirements.txt
 ```
 
-Dependencies: numpy, opencv-python, pyautogui, keyboard, pygetwindow
+Dependencies: numpy, opencv-python, pyautogui, keyboard, pywin32
+
+## Game Settings
+
+The bot is developed and tested with these Bejeweled 3 settings:
+- **Resolution**: Ultra (1920x1200)
+- **Fullscreen**: Off
 
 ## Setup
 
@@ -85,6 +91,7 @@ run.bat           # Windows launcher
 grid_config.json  # Saved grid position (created by calibrate.py)
 logs/             # Playthrough logs
 gem_library/      # Captured gem screenshots
+unknown_gems/     # Unidentified gem captures for review
 ```
 
 ## License

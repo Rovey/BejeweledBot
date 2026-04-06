@@ -339,10 +339,11 @@ def classify_special(cell_bgr):
 _unknown_gem_timestamps = {}  # Throttle: track last save time per cell
 
 
-def identify_cell_color(grid_img, row, col):
+def identify_cell_color(grid_img, row, col, save_unknowns=False):
     """Identify gem color and special type. Returns (row, col, gem_name).
 
     gem_name is one of: 'red', 'blue', ..., 'red_flame', 'blue_star', 'hypercube', or ''.
+    save_unknowns: if True, save unidentified cells to unknown_gems/ for review.
     """
     cell_width = grid_img.shape[1] // GRID_SIZE
     cell_height = grid_img.shape[0] // GRID_SIZE
@@ -370,15 +371,26 @@ def identify_cell_color(grid_img, row, col):
     h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
     total_pixels = h.size
 
-    # Check for white first (high brightness, low saturation)
+    # Filter for colorful, bright pixels
+    color_mask = (s > MIN_SATURATION) & (v > MIN_VALUE)
+    color_pixels = np.count_nonzero(color_mask)
+
+    # Check for white (high brightness, low saturation).
+    # Special gems (star/flame) have bright glow that creates many false
+    # white pixels — only classify as white if no colored pixels exist.
     white_mask = (s < WHITE_MAX_SAT) & (v > WHITE_MIN_VAL)
-    if np.count_nonzero(white_mask) > total_pixels * MIN_COLOR_RATIO:
+    if (np.count_nonzero(white_mask) > total_pixels * MIN_COLOR_RATIO
+            and (special == "regular"
+                 or color_pixels < total_pixels * MIN_COLOR_RATIO)):
         base = "white"
+    elif color_pixels >= total_pixels * MIN_COLOR_RATIO:
+        median_hue = int(np.median(h[color_mask]))
+        base = classify_hue(median_hue)
+        if not base:
+            return row, col, ""
     else:
-        # Filter for colorful, bright pixels
-        color_mask = (s > MIN_SATURATION) & (v > MIN_VALUE)
-        if np.count_nonzero(color_mask) < total_pixels * MIN_COLOR_RATIO:
-            # Unknown — save screenshot for identification (throttled)
+        # Unknown — optionally save screenshot for identification (throttled)
+        if save_unknowns:
             cell_key = (row, col)
             now = time.time()
             if now - _unknown_gem_timestamps.get(cell_key, 0) > 5:
@@ -387,12 +399,7 @@ def identify_cell_color(grid_img, row, col):
                 os.makedirs(unknown_dir, exist_ok=True)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 cv2.imwrite(os.path.join(unknown_dir, f"r{row}_c{col}_{ts}.png"), full_cell)
-            return row, col, ""
-
-        median_hue = int(np.median(h[color_mask]))
-        base = classify_hue(median_hue)
-        if not base:
-            return row, col, ""
+        return row, col, ""
 
     # Combine base color with special type
     if special in ("flame", "star"):
@@ -436,13 +443,13 @@ def save_gem_library(grid_img, color_grid):
             cv2.imwrite(os.path.join(color_dir, f"{color}_{ts}.png"), full_cell)
 
 
-def build_color_grid(grid_img):
+def build_color_grid(grid_img, save_unknowns=False):
     """Identify colors for all cells in parallel. Returns an 8x8 color grid."""
     color_grid = [["" for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = [
-            executor.submit(identify_cell_color, grid_img, row, col)
+            executor.submit(identify_cell_color, grid_img, row, col, save_unknowns)
             for row in range(GRID_SIZE)
             for col in range(GRID_SIZE)
         ]
@@ -926,6 +933,10 @@ def main():
 
         # Board is valid — reset non-game timer
         non_game_since = None
+
+        # Save unknown gems only on validated boards (avoids animation junk)
+        if identified < GRID_SIZE * GRID_SIZE:
+            build_color_grid(raw_image, save_unknowns=True)
 
         # Clear blacklist only on significant board changes (4+ cells = real cascade).
         # Minor flickers (1-2 cells from hint glow) should NOT reset the blacklist.
