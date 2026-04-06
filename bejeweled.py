@@ -18,6 +18,15 @@ import keyboard
 import numpy as np
 import pyautogui
 
+try:
+    import win32api
+    import win32con
+    import win32gui
+
+    HAS_WIN32 = True
+except ImportError:
+    HAS_WIN32 = False
+
 GRID_SIZE = 8
 
 # HSV hue ranges for gem classification (OpenCV: H=0-179)
@@ -180,6 +189,8 @@ def find_grid_from_window(logger):
             int(win.top + win.height * config["bottom_pct"]),
         )
 
+        hwnd = win._hWnd if HAS_WIN32 else None
+
         logger.info(
             "Grid from config: top-left=%s, bottom-right=%s (%dx%d)",
             top_left,
@@ -187,7 +198,7 @@ def find_grid_from_window(logger):
             bottom_right[0] - top_left[0],
             bottom_right[1] - top_left[1],
         )
-        return top_left, bottom_right
+        return top_left, bottom_right, hwnd
 
     except ImportError:
         logger.info("pygetwindow not available")
@@ -323,7 +334,6 @@ def classify_special(cell_bgr):
             return "flame"
 
     return "star"
-    return ""
 
 
 _unknown_gem_timestamps = {}  # Throttle: track last save time per cell
@@ -469,7 +479,7 @@ def is_valid_board(color_grid):
     return True, ""
 
 
-# Scoring weights based on Bejeweled 3 actual point values
+# Heuristic scoring weights (loosely based on Bejeweled 3 point values)
 MATCH_WEIGHTS = {3: 50, 4: 100, 5: 500}  # 4=Flame Gem, 5=Hypercube
 STAR_GEM_BONUS = 150  # L/T match creating a Star Gem
 CASCADE_BASE_BONUS = 50  # Increases by 50 per cascade level
@@ -553,17 +563,20 @@ def apply_gravity(grid):
             grid[row][col] = gems[idx] if idx < len(gems) else ""
 
 
-def evaluate_state(grid):
-    """Score the grid using Bejeweled 3 point values with cascade simulation.
+def evaluate_state(grid, copy=True):
+    """Score the grid using cascade simulation. Returns (score, resulting_grid).
 
-    Scores match types by their actual game value:
+    Heuristic scoring:
     - Match-3: 50 pts
     - Match-4 (Flame Gem): 100 pts
     - Match-5 (Hypercube): 500 pts
     - L/T intersection (Star Gem): +150 pts bonus
     - Cascades: +50, +100, +150... stacking bonus per level
+
+    If copy=False, the input grid is modified in place (caller must provide a copy).
     """
-    grid = [r[:] for r in grid]  # Deep copy for simulation
+    if copy:
+        grid = [r[:] for r in grid]
     total_score = 0
     cascade_level = 0
 
@@ -591,7 +604,51 @@ def evaluate_state(grid):
         apply_gravity(grid)
         cascade_level += 1
 
-    return total_score
+    return total_score, grid
+
+
+def _score_swap(grid, row, col, direction):
+    """Score a swap on a grid (modified in place). Returns (score, resulting_grid).
+
+    Handles cascade simulation and special gem bonuses. Only applies flame/star
+    bonuses when the special gem is actually part of a match.
+    The caller must provide a copy — this function modifies grid in place.
+    """
+    if direction == "right":
+        src, dst = grid[row][col], grid[row][col + 1]
+        grid[row][col], grid[row][col + 1] = dst, src
+        # After swap: src is at col+1, dst is at col
+        src_pos, dst_pos = (row, col + 1), (row, col)
+    else:
+        src, dst = grid[row][col], grid[row + 1][col]
+        grid[row][col], grid[row + 1][col] = dst, src
+        # After swap: src is at row+1, dst is at row
+        src_pos, dst_pos = (row + 1, col), (row, col)
+
+    # Find initial matches to check which gems are involved
+    initial_matches = find_matches(grid)
+    matched_cells = set()
+    for r, c, length, d in initial_matches:
+        for i in range(length):
+            if d == "h":
+                matched_cells.add((r, c + i))
+            else:
+                matched_cells.add((r + i, c))
+
+    score, grid = evaluate_state(grid, copy=False)
+
+    # Special gem bonuses (only if the special gem is part of a match)
+    if src == "hypercube" or dst == "hypercube":
+        score += HYPERCUBE_SWAP_BONUS
+    elif score > 0:
+        for gem, pos in ((src, src_pos), (dst, dst_pos)):
+            if gem and pos in matched_cells:
+                if "_flame" in gem:
+                    score += FLAME_MATCH_BONUS
+                elif "_star" in gem:
+                    score += STAR_MATCH_BONUS
+
+    return score, grid
 
 
 def simulate_move(grid, row, col, direction):
@@ -600,36 +657,7 @@ def simulate_move(grid, row, col, direction):
     The resulting grid has empty spaces where gems were cleared (pessimistic:
     no new gems fall from above, only existing gems drop via gravity).
     """
-    grid = [r[:] for r in grid]
-
-    if direction == "right":
-        src, dst = grid[row][col], grid[row][col + 1]
-        grid[row][col], grid[row][col + 1] = dst, src
-    else:
-        src, dst = grid[row][col], grid[row + 1][col]
-        grid[row][col], grid[row + 1][col] = dst, src
-
-    score = evaluate_state(grid)
-
-    # Special gem bonuses
-    if src == "hypercube" or dst == "hypercube":
-        score += HYPERCUBE_SWAP_BONUS
-    elif score > 0:
-        for gem in (src, dst):
-            if gem and "_flame" in gem:
-                score += FLAME_MATCH_BONUS
-            elif gem and "_star" in gem:
-                score += STAR_MATCH_BONUS
-
-    # Simulate cascades to get the resulting board state
-    while True:
-        matches = find_matches(grid)
-        if not matches:
-            break
-        clear_matches(grid, matches)
-        apply_gravity(grid)
-
-    return score, grid
+    return _score_swap([r[:] for r in grid], row, col, direction)
 
 
 def best_next_score(grid):
@@ -637,23 +665,14 @@ def best_next_score(grid):
     best = 0
     for row in range(GRID_SIZE):
         for col in range(GRID_SIZE):
-            bc = gem_base_color(grid[row][col])
-            if not bc:
+            if not gem_base_color(grid[row][col]):
                 continue
             if col < GRID_SIZE - 1 and grid[row][col + 1]:
-                g = [r[:] for r in grid]
-                g[row][col], g[row][col + 1] = g[row][col + 1], g[row][col]
-                s = evaluate_state(g)
-                if g[row][col] == "hypercube" or g[row][col + 1] == "hypercube":
-                    s += HYPERCUBE_SWAP_BONUS
+                s, _ = _score_swap([r[:] for r in grid], row, col, "right")
                 if s > best:
                     best = s
             if row < GRID_SIZE - 1 and grid[row + 1][col]:
-                g = [r[:] for r in grid]
-                g[row][col], g[row + 1][col] = g[row + 1][col], g[row][col]
-                s = evaluate_state(g)
-                if g[row][col] == "hypercube" or g[row + 1][col] == "hypercube":
-                    s += HYPERCUBE_SWAP_BONUS
+                s, _ = _score_swap([r[:] for r in grid], row, col, "down")
                 if s > best:
                     best = s
     return best
@@ -679,9 +698,11 @@ def evaluate_move(color_grid, row, col, direction):
     if step1_score == 0:
         return 0, move
 
-    # Step 2: best follow-up move on the resulting board (discounted by 50%)
+    # Step 2: best follow-up move on the resulting board (discounted by ~33%).
+    # The board already has empty cells (no new gems simulated), so step-2
+    # scores are naturally deflated — a mild discount avoids double-penalizing.
     step2_score = best_next_score(resulting_grid)
-    total = step1_score + step2_score // 2
+    total = step1_score + step2_score * 2 // 3
 
     # Tiebreaker: prefer moves lower on the board (more cascade potential)
     total += row * BOTTOM_ROW_BONUS
@@ -714,21 +735,30 @@ def find_optimal_move(color_grid, failed_moves=None):
                 if move_tuple not in failed_moves:
                     moves.append((color_grid, row, col, "down"))
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [executor.submit(evaluate_move, *args) for args in moves]
-        for future in concurrent.futures.as_completed(futures):
-            score, move = future.result()
-            if score > best_score:
-                best_score = score
-                best_move = move
+    # Evaluate sequentially — Python's GIL prevents ThreadPoolExecutor from
+    # achieving real parallelism on CPU-bound work like move scoring.
+    for args in moves:
+        score, move = evaluate_move(*args)
+        if score > best_score:
+            best_score = score
+            best_move = move
 
     return best_move, best_score
 
 
-def perform_move(top_left, bottom_right, src_row, src_col, dest_row, dest_col):
+def _send_click(hwnd, screen_x, screen_y):
+    """Send a mouse click to a window without moving the physical mouse."""
+    client_x, client_y = win32gui.ScreenToClient(hwnd, (screen_x, screen_y))
+    lparam = win32api.MAKELONG(client_x, client_y)
+    win32gui.SendMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lparam)
+    win32gui.SendMessage(hwnd, win32con.WM_LBUTTONUP, 0, lparam)
+
+
+def perform_move(top_left, bottom_right, src_row, src_col, dest_row, dest_col, hwnd=None):
     """Click the source and destination cells to perform a gem swap.
 
     Uses screen coordinates (not image pixels) to avoid DPI scaling mismatches.
+    If hwnd is provided, sends clicks via SendMessage (doesn't move the mouse).
     """
     cell_width = (bottom_right[0] - top_left[0]) / GRID_SIZE
     cell_height = (bottom_right[1] - top_left[1]) / GRID_SIZE
@@ -742,9 +772,14 @@ def perform_move(top_left, bottom_right, src_row, src_col, dest_row, dest_col):
         int(top_left[1] + dest_row * cell_height + cell_height / 2),
     )
 
-    pyautogui.click(from_pos)
-    time.sleep(0.1)
-    pyautogui.click(to_pos)
+    if hwnd:
+        _send_click(hwnd, *from_pos)
+        time.sleep(0.1)
+        _send_click(hwnd, *to_pos)
+    else:
+        pyautogui.click(from_pos)
+        time.sleep(0.1)
+        pyautogui.click(to_pos)
 
 
 def main():
@@ -754,10 +789,16 @@ def main():
     # Try auto-detection, fall back to manual calibration
     coords = find_grid_from_window(logger)
     if coords:
-        top_left, bottom_right = coords
+        top_left, bottom_right, hwnd = coords
     else:
         logger.info("Auto-detect unavailable, using manual calibration")
         top_left, bottom_right = get_grid_coordinates()
+        hwnd = None
+
+    if hwnd:
+        logger.info("Using SendMessage for clicks (mouse stays free)")
+    else:
+        logger.info("Using pyautogui for clicks (mouse will be controlled)")
 
     logger.info(
         "Grid coordinates: top-left=%s, bottom-right=%s", top_left, bottom_right
@@ -875,7 +916,7 @@ def main():
             # Re-detect grid in case window moved
             new_coords = find_grid_from_window(logger)
             if new_coords:
-                top_left, bottom_right = new_coords
+                top_left, bottom_right, hwnd = new_coords
                 logger.info(
                     "Updated grid: top-left=%s, bottom-right=%s",
                     top_left,
@@ -989,7 +1030,7 @@ def main():
                 score,
             )
 
-            perform_move(top_left, bottom_right, from_row, from_col, to_row, to_col)
+            perform_move(top_left, bottom_right, from_row, from_col, to_row, to_col, hwnd)
             last_move = move
         else:
             logger.debug("No valid move found this frame")
