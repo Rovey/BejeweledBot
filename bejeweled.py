@@ -72,7 +72,7 @@ HYPERCUBE_BORDER_S_THRESHOLD = 90  # Hypercube 73, next lowest 102
 FLAME_HUE_STD_THRESHOLD = 35  # Flame min 43, star max 30
 
 # Bonus scores for moves involving special gems
-HYPERCUBE_SWAP_BONUS = 1000  # Clears entire color (moderate: save for emergencies)
+HYPERCUBE_SWAP_SCORE = 1  # Last resort: save hypercubes until no other moves exist
 FLAME_MATCH_BONUS = 200  # 3x3 explosion (~8 extra gems)
 STAR_MATCH_BONUS = 400  # Cross detonation (~14 extra gems)
 
@@ -662,9 +662,10 @@ def _score_swap(grid, row, col, direction):
 
     score, grid = evaluate_state(grid, copy=False, initial_matches=initial_matches)
 
-    # Special gem bonuses (only if the special gem is part of a match)
+    # Hypercube swaps are always valid but scored as last resort — save them
+    # until no regular moves remain (they're the emergency "unjam" tool).
     if src == "hypercube" or dst == "hypercube":
-        score += HYPERCUBE_SWAP_BONUS
+        return HYPERCUBE_SWAP_SCORE, grid
     elif score > 0:
         for gem, pos in ((src, src_pos), (dst, dst_pos)):
             if gem and pos in matched_cells:
@@ -780,8 +781,15 @@ def evaluate_move(color_grid, row, col, direction):
     """
     if direction == "right":
         move = (row, col, row, col + 1)
+        src, dst = color_grid[row][col], color_grid[row][col + 1]
     else:
         move = (row, col, row + 1, col)
+        src, dst = color_grid[row][col], color_grid[row + 1][col]
+
+    # Hypercubes are saved as a last resort — return minimal score and skip
+    # the expensive look-ahead so any regular match will be preferred.
+    if src == "hypercube" or dst == "hypercube":
+        return HYPERCUBE_SWAP_SCORE, move
 
     # Step 1: evaluate this move
     step1_score, resulting_grid = simulate_move(color_grid, row, col, direction)
