@@ -12,9 +12,11 @@ import logging
 import os
 import time
 from datetime import datetime
+from functools import lru_cache
 
 import cv2
 import keyboard
+import mss
 import numpy as np
 import pyautogui
 
@@ -26,6 +28,9 @@ try:
     HAS_WIN32 = True
 except ImportError:
     HAS_WIN32 = False
+
+_sct = mss.mss()
+_thread_pool = concurrent.futures.ThreadPoolExecutor()
 
 GRID_SIZE = 8
 
@@ -216,15 +221,13 @@ def get_grid_coordinates():
 
 def capture_raw(top_left, bottom_right):
     """Capture a raw screenshot of the grid region."""
-    screenshot = pyautogui.screenshot(
-        region=(
-            top_left[0],
-            top_left[1],
-            bottom_right[0] - top_left[0],
-            bottom_right[1] - top_left[1],
-        )
-    )
-    return cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+    region = {
+        "left": top_left[0],
+        "top": top_left[1],
+        "width": bottom_right[0] - top_left[0],
+        "height": bottom_right[1] - top_left[1],
+    }
+    return cv2.cvtColor(np.array(_sct.grab(region)), cv2.COLOR_BGRA2BGR)
 
 
 def add_grid_overlay(grid_img):
@@ -270,6 +273,7 @@ def wait_for_stable_board(top_left, bottom_right, logger):
     return False
 
 
+@lru_cache(maxsize=32)
 def gem_base_color(gem_name):
     """Extract base color from a gem name (e.g., 'red_flame' -> 'red')."""
     if not gem_name or gem_name == "hypercube":
@@ -286,18 +290,18 @@ def classify_hue(hue):
             return name
 
 
-def classify_special(cell_bgr):
+def classify_special(cell_hsv):
     """Classify a gem cell as regular, flame, star, or hypercube.
 
-    Analyzes the border region (outer 25% ring) of the cell:
+    Expects a pre-computed HSV cell image. Analyzes the border region
+    (outer 25% ring) of the cell:
     - Regular gems have dark borders (background)
     - Flame gems have bright, saturated orange/yellow fire aura
     - Star gems have bright, desaturated white/blue glow
     - Hypercube has bright border with low saturation (multicolor metallic)
     """
-    hsv = cv2.cvtColor(cell_bgr, cv2.COLOR_BGR2HSV)
-    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
-    cell_h, cell_w = cell_bgr.shape[:2]
+    h, s, v = cell_hsv[:, :, 0], cell_hsv[:, :, 1], cell_hsv[:, :, 2]
+    cell_h, cell_w = cell_hsv.shape[:2]
 
     # Border = outer ring (everything outside center 50%)
     border_mask = np.ones((cell_h, cell_w), dtype=bool)
@@ -316,7 +320,7 @@ def classify_special(cell_bgr):
     # This prevents white flames (single color + low saturation glow) from being
     # misidentified as hypercubes.
     if border_s < HYPERCUBE_BORDER_S_THRESHOLD and border_v > HYPERCUBE_BORDER_V_THRESHOLD:
-        center = hsv[cell_h // 4 : cell_h * 3 // 4, cell_w // 4 : cell_w * 3 // 4]
+        center = cell_hsv[cell_h // 4 : cell_h * 3 // 4, cell_w // 4 : cell_w * 3 // 4]
         ch, cs, cv = center[:, :, 0], center[:, :, 1], center[:, :, 2]
         bright_mask = (cs > 40) & (cv > 40)
         if np.count_nonzero(bright_mask) > 10:
@@ -339,36 +343,36 @@ def classify_special(cell_bgr):
 _unknown_gem_timestamps = {}  # Throttle: track last save time per cell
 
 
-def identify_cell_color(grid_img, row, col, save_unknowns=False):
+def identify_cell_color(grid_img, grid_hsv, row, col, save_unknowns=False):
     """Identify gem color and special type. Returns (row, col, gem_name).
 
     gem_name is one of: 'red', 'blue', ..., 'red_flame', 'blue_star', 'hypercube', or ''.
+    grid_hsv: pre-computed HSV image of the entire grid (avoids redundant conversions).
     save_unknowns: if True, save unidentified cells to unknown_gems/ for review.
     """
     cell_width = grid_img.shape[1] // GRID_SIZE
     cell_height = grid_img.shape[0] // GRID_SIZE
 
-    # Full cell for special gem detection
-    full_cell = grid_img[
+    # Full cell HSV for special gem detection (from pre-computed HSV)
+    full_cell_hsv = grid_hsv[
         row * cell_height : (row + 1) * cell_height,
         col * cell_width : (col + 1) * cell_width,
     ]
 
     # Check for special gem type (uses border glow analysis)
-    special = classify_special(full_cell)
+    special = classify_special(full_cell_hsv)
 
     # Hypercube has no base color — return immediately
     if special == "hypercube":
         return row, col, "hypercube"
 
-    # Center 50% for base color classification
-    center = full_cell[
+    # Center 50% from pre-computed HSV (no second cvtColor call)
+    center_hsv = full_cell_hsv[
         cell_height // 4 : cell_height - cell_height // 4,
         cell_width // 4 : cell_width - cell_width // 4,
     ]
-    hsv = cv2.cvtColor(center, cv2.COLOR_BGR2HSV)
 
-    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    h, s, v = center_hsv[:, :, 0], center_hsv[:, :, 1], center_hsv[:, :, 2]
     total_pixels = h.size
 
     # Filter for colorful, bright pixels
@@ -398,6 +402,10 @@ def identify_cell_color(grid_img, row, col, save_unknowns=False):
                 unknown_dir = os.path.join(os.path.dirname(__file__) or ".", "unknown_gems")
                 os.makedirs(unknown_dir, exist_ok=True)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                full_cell = grid_img[
+                    row * cell_height : (row + 1) * cell_height,
+                    col * cell_width : (col + 1) * cell_width,
+                ]
                 cv2.imwrite(os.path.join(unknown_dir, f"r{row}_c{col}_{ts}.png"), full_cell)
         return row, col, ""
 
@@ -444,20 +452,24 @@ def save_gem_library(grid_img, color_grid):
 
 
 def build_color_grid(grid_img, save_unknowns=False):
-    """Identify colors for all cells in parallel. Returns an 8x8 color grid."""
+    """Identify colors for all cells in parallel. Returns (color_grid, grid_hsv).
+
+    Converts the grid image to HSV once and reuses it for all 64 cells,
+    avoiding redundant per-cell cvtColor calls.
+    """
+    grid_hsv = cv2.cvtColor(grid_img, cv2.COLOR_BGR2HSV)
     color_grid = [["" for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [
-            executor.submit(identify_cell_color, grid_img, row, col, save_unknowns)
-            for row in range(GRID_SIZE)
-            for col in range(GRID_SIZE)
-        ]
-        for future in concurrent.futures.as_completed(futures):
-            row, col, color = future.result()
-            color_grid[row][col] = color
+    futures = [
+        _thread_pool.submit(identify_cell_color, grid_img, grid_hsv, row, col, save_unknowns)
+        for row in range(GRID_SIZE)
+        for col in range(GRID_SIZE)
+    ]
+    for future in concurrent.futures.as_completed(futures):
+        row, col, color = future.result()
+        color_grid[row][col] = color
 
-    return color_grid
+    return color_grid, grid_hsv
 
 
 def is_valid_board(color_grid):
@@ -570,7 +582,7 @@ def apply_gravity(grid):
             grid[row][col] = gems[idx] if idx < len(gems) else ""
 
 
-def evaluate_state(grid, copy=True):
+def evaluate_state(grid, copy=True, initial_matches=None):
     """Score the grid using cascade simulation. Returns (score, resulting_grid).
 
     Heuristic scoring:
@@ -581,6 +593,8 @@ def evaluate_state(grid, copy=True):
     - Cascades: +50, +100, +150... stacking bonus per level
 
     If copy=False, the input grid is modified in place (caller must provide a copy).
+    initial_matches: if provided, reused for the first cascade iteration
+    (avoids a redundant find_matches call when the caller already found them).
     """
     if copy:
         grid = [r[:] for r in grid]
@@ -588,7 +602,11 @@ def evaluate_state(grid, copy=True):
     cascade_level = 0
 
     while True:
-        matches = find_matches(grid)
+        if initial_matches is not None:
+            matches = initial_matches
+            initial_matches = None
+        else:
+            matches = find_matches(grid)
         if not matches:
             break
 
@@ -642,7 +660,7 @@ def _score_swap(grid, row, col, direction):
             else:
                 matched_cells.add((r + i, c))
 
-    score, grid = evaluate_state(grid, copy=False)
+    score, grid = evaluate_state(grid, copy=False, initial_matches=initial_matches)
 
     # Special gem bonuses (only if the special gem is part of a match)
     if src == "hypercube" or dst == "hypercube":
@@ -667,21 +685,89 @@ def simulate_move(grid, row, col, direction):
     return _score_swap([r[:] for r in grid], row, col, direction)
 
 
+def build_base_grid(color_grid):
+    """Pre-compute base colors for the entire grid (avoids repeated string splitting)."""
+    return [[gem_base_color(color_grid[r][c]) for c in range(GRID_SIZE)] for r in range(GRID_SIZE)]
+
+
+def swap_creates_match(base_grid, r1, c1, r2, c2):
+    """Quick check if swapping (r1,c1) with (r2,c2) creates a match-3.
+
+    Examines only the rows/columns of the two swapped cells (~28 checks)
+    instead of scanning all 128 cells via find_matches. Returns True if
+    at least one match-3 would be formed.
+    """
+    bc1, bc2 = base_grid[r1][c1], base_grid[r2][c2]
+
+    if not bc1 or not bc2:
+        return False
+    if bc1 == "hypercube" or bc2 == "hypercube":
+        return True
+    if bc1 == bc2:
+        return False  # Swapping identical colors never creates a new match
+
+    # After swap: bc1 is at (r2,c2), bc2 is at (r1,c1).
+    # Check each gem at its new position for horizontal and vertical runs.
+    for bc, r, c, other_r, other_c in ((bc1, r2, c2, r1, c1), (bc2, r1, c1, r2, c2)):
+        # Horizontal run through (r, c)
+        h_count = 1
+        for cc in range(c - 1, -1, -1):
+            eff = bc2 if (bc is bc1 and r == other_r and cc == other_c) else \
+                  bc1 if (bc is bc2 and r == other_r and cc == other_c) else \
+                  base_grid[r][cc]
+            if eff != bc:
+                break
+            h_count += 1
+        for cc in range(c + 1, GRID_SIZE):
+            eff = bc2 if (bc is bc1 and r == other_r and cc == other_c) else \
+                  bc1 if (bc is bc2 and r == other_r and cc == other_c) else \
+                  base_grid[r][cc]
+            if eff != bc:
+                break
+            h_count += 1
+        if h_count >= 3:
+            return True
+
+        # Vertical run through (r, c)
+        v_count = 1
+        for rr in range(r - 1, -1, -1):
+            eff = bc2 if (bc is bc1 and rr == other_r and c == other_c) else \
+                  bc1 if (bc is bc2 and rr == other_r and c == other_c) else \
+                  base_grid[rr][c]
+            if eff != bc:
+                break
+            v_count += 1
+        for rr in range(r + 1, GRID_SIZE):
+            eff = bc2 if (bc is bc1 and rr == other_r and c == other_c) else \
+                  bc1 if (bc is bc2 and rr == other_r and c == other_c) else \
+                  base_grid[rr][c]
+            if eff != bc:
+                break
+            v_count += 1
+        if v_count >= 3:
+            return True
+
+    return False
+
+
 def best_next_score(grid):
     """Find the best single-move score on a board state (for look-ahead)."""
+    base = build_base_grid(grid)
     best = 0
     for row in range(GRID_SIZE):
         for col in range(GRID_SIZE):
-            if not gem_base_color(grid[row][col]):
+            if not base[row][col]:
                 continue
-            if col < GRID_SIZE - 1 and grid[row][col + 1]:
-                s, _ = _score_swap([r[:] for r in grid], row, col, "right")
-                if s > best:
-                    best = s
-            if row < GRID_SIZE - 1 and grid[row + 1][col]:
-                s, _ = _score_swap([r[:] for r in grid], row, col, "down")
-                if s > best:
-                    best = s
+            if col < GRID_SIZE - 1 and base[row][col + 1]:
+                if swap_creates_match(base, row, col, row, col + 1):
+                    s, _ = _score_swap([r[:] for r in grid], row, col, "right")
+                    if s > best:
+                        best = s
+            if row < GRID_SIZE - 1 and base[row + 1][col]:
+                if swap_creates_match(base, row, col, row + 1, col):
+                    s, _ = _score_swap([r[:] for r in grid], row, col, "down")
+                    if s > best:
+                        best = s
     return best
 
 
@@ -725,25 +811,26 @@ def find_optimal_move(color_grid, failed_moves=None):
     if failed_moves is None:
         failed_moves = set()
 
+    base_grid = build_base_grid(color_grid)
     best_move = None
     best_score = 0
 
     moves = []
     for row in range(GRID_SIZE):
         for col in range(GRID_SIZE):
-            if not color_grid[row][col]:
+            if not base_grid[row][col]:
                 continue
-            if col < GRID_SIZE - 1:
+            if col < GRID_SIZE - 1 and base_grid[row][col + 1]:
                 move_tuple = (row, col, row, col + 1)
                 if move_tuple not in failed_moves:
-                    moves.append((color_grid, row, col, "right"))
-            if row < GRID_SIZE - 1:
+                    if swap_creates_match(base_grid, row, col, row, col + 1):
+                        moves.append((color_grid, row, col, "right"))
+            if row < GRID_SIZE - 1 and base_grid[row + 1][col]:
                 move_tuple = (row, col, row + 1, col)
                 if move_tuple not in failed_moves:
-                    moves.append((color_grid, row, col, "down"))
+                    if swap_creates_match(base_grid, row, col, row + 1, col):
+                        moves.append((color_grid, row, col, "down"))
 
-    # Evaluate sequentially — Python's GIL prevents ThreadPoolExecutor from
-    # achieving real parallelism on CPU-bound work like move scoring.
     for args in moves:
         score, move = evaluate_move(*args)
         if score > best_score:
@@ -828,7 +915,7 @@ def main():
         wait_for_stable_board(top_left, bottom_right, logger)
 
         raw_image = capture_raw(top_left, bottom_right)
-        color_grid = build_color_grid(raw_image)
+        color_grid, grid_hsv = build_color_grid(raw_image)
 
         # Build gem screenshot library (saves one example per color type)
         save_gem_library(raw_image, color_grid)
@@ -934,9 +1021,13 @@ def main():
         # Board is valid — reset non-game timer
         non_game_since = None
 
-        # Save unknown gems only on validated boards (avoids animation junk)
+        # Save unknown gems only on validated boards (avoids animation junk).
+        # Only re-identify the unknown cells instead of all 64.
         if identified < GRID_SIZE * GRID_SIZE:
-            build_color_grid(raw_image, save_unknowns=True)
+            for r in range(GRID_SIZE):
+                for c in range(GRID_SIZE):
+                    if not color_grid[r][c]:
+                        identify_cell_color(raw_image, grid_hsv, r, c, save_unknowns=True)
 
         # Clear blacklist only on significant board changes (4+ cells = real cascade).
         # Minor flickers (1-2 cells from hint glow) should NOT reset the blacklist.
@@ -963,26 +1054,19 @@ def main():
 
         if move:
             # --- Double-scan validation ---
-            # Wait briefly then re-capture to ensure no animation is playing.
-            # Without this delay, we might screenshot mid-animation and see
-            # a false-stable board that matches the first scan by coincidence.
-            time.sleep(0.7)
+            # Quick pixel-diff check instead of a full grid rebuild.
+            # Uses the same approach as wait_for_stable_board: compare raw
+            # frames. Much faster than re-identifying all 64 cells.
+            time.sleep(STABILITY_DELAY)
             raw_image2 = capture_raw(top_left, bottom_right)
-            color_grid2 = build_color_grid(raw_image2)
-            grid_state2 = tuple(tuple(row) for row in color_grid2)
-
-            if grid_state2 != grid_state:
-                changes = sum(
-                    a != b
-                    for row_a, row_b in zip(grid_state, grid_state2)
-                    for a, b in zip(row_a, row_b)
+            diff = np.mean(np.abs(
+                raw_image2.astype(np.int16) - raw_image.astype(np.int16)
+            ))
+            if diff > STABILITY_THRESHOLD:
+                logger.debug(
+                    "Board changed during planning (diff=%.2f), re-scanning", diff
                 )
-                if changes >= 4:
-                    logger.debug(
-                        "Board changed during planning (%d cells), re-scanning",
-                        changes,
-                    )
-                    continue
+                continue
 
             from_row, from_col, to_row, to_col = move
 
